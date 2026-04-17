@@ -3,16 +3,18 @@ import asyncio
 import logging
 import httpx
 import time
+import json
 from collections import OrderedDict
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, TypedDict, Optional, Annotated
 from dotenv import load_dotenv
 from langchain_core.prompts import PromptTemplate
 from langchain_community.vectorstores import FAISS
 from langchain.schema import Document
+from langgraph.graph import StateGraph, START, END
 
-from model import Prompt, llm, NomicEmbeddings, rewrite_llm
+from model import Prompt, llm, NomicEmbeddings, rewrite_llm, INTAKE_AGENT_PROMPT, RECOMMENDATION_AGENT_PROMPT, llm_json
 from utils import parse_document_from_url, split_documents
 
 # ---------------------- CONFIG / TUNABLES ---------------------- #
@@ -43,6 +45,31 @@ embedding_cache: Dict[int, List[float]] = OrderedDict()  # hash(text) -> embeddi
 class QueryRequest(BaseModel):
     documents: str
     questions: List[str]
+
+class IntakeRequest(BaseModel):
+    session_id: str
+    user_input: str
+    chat_history: List[str] = []
+    age: Optional[int] = None
+    family_size: Optional[str] = None
+    pre_existing_conditions: Optional[str] = None
+    budget: Optional[str] = None
+    documents: Optional[str] = None
+
+class AgentState(TypedDict):
+    session_id: str
+    chat_history: List[str]
+    user_input: str
+    age: Optional[int]
+    family_size: Optional[str]
+    pre_existing_conditions: Optional[str]
+    budget: Optional[str]
+    intake_complete: bool
+    retrieved_policies: List[str]
+    final_recommendation: str
+    documents: Optional[str]
+    next_question: Optional[str]
+    auth_token: Optional[str]
 
 # ---------------------- Helpers ---------------------- #
 def clean_output(answer):
@@ -93,10 +120,18 @@ Rewritten Query:
 # ----- Robust HTTP fetch for URLs (concurrent, limited, with retries) -----
 async def fetch_url(client: httpx.AsyncClient, url: str, auth_token: str = None) -> str:
     """Fetch URL content (with optional Authorization) using provided client, with retries."""
-    headers = {"Authorization": auth_token} if auth_token else {}
+
+    # --- UPDATE HEADERS TO INCLUDE BROWSER SPOOFING ---
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    if auth_token:
+        headers["Authorization"] = auth_token
+
     last_exc = None
     for attempt in range(HTTP_RETRY_MAX):
         try:
+            # Pass the updated headers here
             resp = await client.get(url, headers=headers)
             resp.raise_for_status()
             return resp.text.strip()
@@ -253,12 +288,12 @@ async def home():
 async def run_query(req: QueryRequest, Authorization: str = Header(default=None)):
     start = time.time()
 
-    if not Authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    # if not Authorization:
+    #     raise HTTPException(status_code=401, detail="Missing Authorization header")
 
     # Hash doc_key with auth for security (prevent cross-user cache pollution)
     import hashlib
-    doc_key = hashlib.sha256((req.documents + Authorization).encode()).hexdigest()
+    doc_key = hashlib.sha256(req.documents.encode()).hexdigest()
 
     if doc_key in faiss_cache:
         db = faiss_cache[doc_key]
@@ -327,3 +362,150 @@ async def run_query(req: QueryRequest, Authorization: str = Header(default=None)
     elapsed = time.time() - start
     logger.info(f"Total run_query time: {elapsed:.2f}s")
     return {"answers": answers}
+
+# ---------------------- Agent Nodes & LangGraph ---------------------- #
+
+async def information_gatherer_node(state: AgentState) -> AgentState:
+    chain = INTAKE_AGENT_PROMPT | llm_json
+    response = await chain.ainvoke({
+        "chat_history": "\n".join(state.get("chat_history", [])),
+        "user_input": state.get("user_input", ""),
+        "age": state.get("age") or "",
+        "family_size": state.get("family_size") or "",
+        "pre_existing_conditions": state.get("pre_existing_conditions") or "",
+        "budget": state.get("budget") or ""
+    })
+    
+    try:
+        data = json.loads(response.content if hasattr(response, "content") else response)
+    except Exception as e:
+        logger.error(f"Failed to parse JSON from information_gatherer: {e}")
+        data = {}
+        
+    if "age" in data and data["age"]: state["age"] = data["age"]
+    if "family_size" in data and data["family_size"]: state["family_size"] = data["family_size"]
+    if "pre_existing_conditions" in data and data["pre_existing_conditions"]: state["pre_existing_conditions"] = data["pre_existing_conditions"]
+    if "budget" in data and data["budget"]: state["budget"] = data["budget"]
+    
+    if "next_question" in data:
+        state["next_question"] = data["next_question"]
+        
+    state["intake_complete"] = data.get("intake_complete", False)
+    
+    return state
+
+async def policy_retriever_node(state: AgentState) -> AgentState:
+    doc_url = state.get("documents")
+    if not doc_url:
+        logger.warning("No documents URL provided in state, skipping retrieval.")
+        state["retrieved_policies"] = []
+        return state
+        
+    import hashlib
+    doc_key = hashlib.sha256(doc_url.encode()).hexdigest()
+
+    # Reuse FAISS caching logic
+    if doc_key in faiss_cache:
+        db = faiss_cache[doc_key]
+        logger.info("Using cached FAISS retriever for agent")
+    else:
+        try:
+            parsed_docs = await parse_document_from_url(doc_url)
+            chunks = split_documents(parsed_docs)
+            text_list = [c.page_content for c in chunks]
+            
+            auth = state.get("auth_token")
+            enriched_text_list, found_urls = await enrich_document_with_urls_fast(text_list, auth, max_conn=HTTP_MAX_CONNECTIONS)
+            
+            embedding_model = NomicEmbeddings()
+            enriched_chunks = [Document(page_content=t) for t in enriched_text_list]
+            db = await build_faiss_concurrent(enriched_chunks, embedding_model, batch_size=BATCH_SIZE, max_concurrent=MAX_CONCURRENT_EMBED_CALLS)
+            
+            if len(found_urls) == 0:
+                faiss_cache[doc_key] = db
+                if len(faiss_cache) > MAX_CACHE_SIZE:
+                    faiss_cache.pop(next(iter(faiss_cache)))
+        except Exception as e:
+            logger.error(f"Failed to retrieve/build FAISS in agent block: {e}")
+            state["retrieved_policies"] = []
+            return state
+
+    retriever = db.as_retriever(search_type="mmr", search_kwargs={"k": 5, "lambda_mult": 0.3})
+    
+    # Synthesize the search query based on agent parameters
+    search_query = f"insurance policy for age {state.get('age')}, family size {state.get('family_size')}, budget {state.get('budget')}, limitations: {state.get('pre_existing_conditions')}"
+    
+    try:
+        context_docs = await asyncio.to_thread(retriever.invoke, search_query)
+        context = "\n".join([doc.page_content for doc in context_docs]) if context_docs else ""
+        context = context[:8000]
+        state["retrieved_policies"] = [context]
+    except Exception as e:
+        logger.error(f"Failed to query FAISS retriever: {e}")
+        state["retrieved_policies"] = []
+        
+    return state
+
+async def recommendation_node(state: AgentState) -> AgentState:
+    chain = RECOMMENDATION_AGENT_PROMPT | llm
+    
+    context = state.get("retrieved_policies", [])
+    context_str = context[0] if context else "No policies available."
+    
+    response = await chain.ainvoke({
+        "context": context_str,
+        "age": state.get("age") or "Not specified",
+        "family_size": state.get("family_size") or "Not specified",
+        "pre_existing_conditions": state.get("pre_existing_conditions") or "Not specified",
+        "budget": state.get("budget") or "Not specified"
+    })
+    
+    state["final_recommendation"] = clean_output(response)
+    return state
+
+def should_continue(state: AgentState):
+    if state.get("intake_complete"):
+        return "policy_retriever_node"
+    else:
+        return END
+
+# Compile Graph
+graph_builder = StateGraph(AgentState)
+graph_builder.add_node("information_gatherer_node", information_gatherer_node)
+graph_builder.add_node("policy_retriever_node", policy_retriever_node)
+graph_builder.add_node("recommendation_node", recommendation_node)
+
+graph_builder.add_edge(START, "information_gatherer_node")
+graph_builder.add_conditional_edges("information_gatherer_node", should_continue)
+graph_builder.add_edge("policy_retriever_node", "recommendation_node")
+graph_builder.add_edge("recommendation_node", END)
+
+agent_graph = graph_builder.compile()
+
+@app.post("/chat/intake")
+async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=None)):
+    initial_state = {
+        "session_id": req.session_id,
+        "user_input": req.user_input,
+        "chat_history": req.chat_history,
+        "age": req.age,
+        "family_size": req.family_size,
+        "pre_existing_conditions": req.pre_existing_conditions,
+        "budget": req.budget,
+        "documents": req.documents,
+        "auth_token": Authorization,
+        "intake_complete": False,
+        "retrieved_policies": [],
+        "final_recommendation": "",
+        "next_question": ""
+    }
+    
+    try:
+        final_state = await agent_graph.ainvoke(initial_state)
+        # Avoid returning auth token to frontend
+        if "auth_token" in final_state:
+            del final_state["auth_token"]
+        return final_state
+    except Exception as e:
+        logger.exception("Agent graph failed")
+        raise HTTPException(status_code=500, detail=str(e))

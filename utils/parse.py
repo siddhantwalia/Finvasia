@@ -92,8 +92,16 @@ async def parse_document_from_url(url: str):
     """Parse documents from URL and extract text content (async, single HTTP request)."""
     logger.info(f"Parsing URL: {url}")
 
-    # Single async request
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+    # --- ADD THESE HEADERS ---
+    browser_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/"
+    }
+
+    # Pass the headers to the client
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, headers=browser_headers) as client:
         resp = await client.get(url)
         resp.raise_for_status()
         content = resp.content

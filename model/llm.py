@@ -11,7 +11,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPEN_AI_KEY = os.getenv("OPEN_AI_KEY")
 # os.environ['GROQ_API_KEY'] = GROQ_API_KEY
 
-# GROQ_Model = "gemma2-9b-it"
+GROQ_Model = "qwen/qwen3-32b"
 # Cohere_Model = "command-r"
 # OPEN_AI_Model = "gpt-4.1-mini-2025-04-14"
 OPEN_AI_Model = "gpt-5-mini-2025-08-07"
@@ -21,23 +21,37 @@ OPEN_AI_Model = "gpt-5-mini-2025-08-07"
 #     cohere_api_key=CO_API_KEY
 #     )
 
-# llm = ChatGroq(
-#     model=GROQ_Model,
-#     temperature=0.2,
-#     # reasoning_format="parsed",
-#     api_key=GROQ_API_KEY
+llm = ChatGroq(
+    model=GROQ_Model,
+    temperature=0.2,
+    # reasoning_format="parsed",
+    api_key=GROQ_API_KEY
+)
+
+rewrite_llm = ChatGroq(
+    model=GROQ_Model,
+    temperature=0.2,
+    # reasoning_format="parsed",
+    api_key=GROQ_API_KEY
+)
+
+llm_json = ChatGroq(
+    model=GROQ_Model,
+    temperature=0.0,
+    api_key=GROQ_API_KEY,
+).bind(response_format={"type": "json_object"})
+
+
+
+# rewrite_llm = ChatOpenAI(
+#     model=OPEN_AI_Model,
+#     api_key=OPEN_AI_KEY
 # )
 
-
-rewrite_llm = ChatOpenAI(
-    model=OPEN_AI_Model,
-    api_key=OPEN_AI_KEY
-)
-
-llm = ChatOpenAI(
-    model=OPEN_AI_Model,
-    api_key=OPEN_AI_KEY 
-)
+# llm = ChatOpenAI(
+#     model=OPEN_AI_Model,
+#     api_key=OPEN_AI_KEY
+# )
 
 # llm = ChatOpenAI( 
 #     model = OPEN_ROUTER_Model,
