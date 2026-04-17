@@ -6,6 +6,7 @@ import time
 import json
 from collections import OrderedDict
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from typing import List, Dict, TypedDict, Optional, Annotated
 from dotenv import load_dotenv
@@ -20,7 +21,7 @@ from model import (
     INTAKE_AGENT_PROMPT, RECOMMENDATION_AGENT_PROMPT,
     POLICY_COMPARISON_PROMPT, SCENARIO_SIMULATOR_PROMPT,
     VISUAL_SUMMARY_PROMPT, EXCLUSIONS_PROMPT,
-    SEARCH_QUERY_PROMPT, MARKET_ANALYSIS_PROMPT
+    SEARCH_QUERY_PROMPT, MARKET_ANALYSIS_PROMPT, EXPLAINER_PROMPT
 )
 from duckduckgo_search import DDGS
 from utils import parse_document_from_url, split_documents
@@ -49,6 +50,7 @@ MAX_CACHE_SIZE = 100
 # cache structures
 faiss_cache: Dict[str, FAISS] = OrderedDict()  # doc_key -> faiss_db (simplified as requested)
 embedding_cache: Dict[int, List[float]] = OrderedDict()  # hash(text) -> embedding (to avoid re-embedding duplicates)
+session_store: Dict[str, dict] = {}  # session_id -> accumulated agent state
 
 # Add CORS Middleware
 app.add_middleware(
@@ -96,7 +98,9 @@ class IntakeRequest(BaseModel):
     goal: Optional[str] = None
     search_depth: Optional[str] = "basic"  # "basic" (snippets) or "deep" (crawled)
     documents: Optional[str] = None
-
+    
+class ExplainerRequest(BaseModel):
+    snippet: str
 
 class AgentState(TypedDict):
     session_id: str
@@ -503,6 +507,47 @@ async def get_exclusions(req: ExclusionsRequest, Authorization: str = Header(def
     return json.loads(response.content if hasattr(response, "content") else response)
 
 
+@app.post("/explain_snippet")
+async def explain_snippet(req: ExplainerRequest):
+    """Explain a complex policy snippet in 5th-grader terms via SSE Stream."""
+    chain = EXPLAINER_PROMPT | llm
+    
+    async def generate_stream():
+        in_think_block = False
+        async for chunk in chain.astream({"snippet": req.snippet}):
+            content = chunk.content if hasattr(chunk, "content") else str(chunk)
+            if not content:
+                continue
+            
+            # Simple state machine to drop <think> blocks across chunks
+            if "<think>" in content:
+                in_think_block = True
+                content = content.split("<think>")[0]
+            if "</think>" in content:
+                in_think_block = False
+                content = content.split("</think>")[-1]
+                
+            if not in_think_block and content.strip() or content.isspace(): # preserve spaces
+                yield f"data: {json.dumps({'chunk': content})}\n\n"
+                
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate_stream(), media_type="text/event-stream")
+
+
+@app.get("/proxy_pdf")
+async def proxy_pdf(url: str):
+    """Proxy PDF files to bypass CORS for the frontend React-PDF viewer."""
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+            response = await client.get(url)
+            if response.status_code != 200:
+                raise HTTPException(status_code=400, detail=f"Failed to fetch PDF: {response.status_code}")
+            return Response(content=response.content, media_type="application/pdf")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ---------------------- Agent Nodes & LangGraph ---------------------- #
 
 async def information_gatherer_node(state: AgentState) -> AgentState:
@@ -544,54 +589,95 @@ async def information_gatherer_node(state: AgentState) -> AgentState:
 
 async def market_search_node(state: AgentState) -> AgentState:
     """Generates search queries and fetches real-time market data."""
-    # 1. Generate Query strings
-    chain = SEARCH_QUERY_PROMPT | llm_json
-    response = await chain.ainvoke({
-        "age": state.get("age") or "unknown",
-        "family_size": state.get("family_size") or "unknown",
-        "location": state.get("location") or "unknown",
-        "goal": state.get("goal") or "unknown"
-    })
-
+    # 1. Generate Query strings (use regular llm, NOT llm_json — Groq rejects arrays in json_object mode)
+    chain = SEARCH_QUERY_PROMPT | llm
     try:
-        queries = json.loads(response.content if hasattr(response, "content") else response)
-        if isinstance(queries, dict) and "queries" in queries:
-            queries = queries["queries"]
-        state["search_queries"] = queries
+        response = await chain.ainvoke({
+            "age": state.get("age") or "unknown",
+            "family_size": state.get("family_size") or "unknown",
+            "location": state.get("location") or "unknown",
+            "goal": state.get("goal") or "unknown"
+        })
+
+        raw = response.content if hasattr(response, "content") else response
+        # Strip any markdown code fences the LLM might add
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = "\n".join(clean.split("\n")[1:])
+        if clean.endswith("```"):
+            clean = "\n".join(clean.split("\n")[:-1])
+        clean = clean.strip()
+
+        parsed = json.loads(clean)
+        # Handle both {"queries": [...]} and raw [...] formats
+        if isinstance(parsed, dict) and "queries" in parsed:
+            queries = parsed["queries"]
+        elif isinstance(parsed, list):
+            queries = parsed
+        else:
+            queries = list(parsed.values())[0] if parsed else []
+        state["search_queries"] = [q for q in queries if isinstance(q, str)][:5]
     except Exception as e:
-        logger.error(f"Failed to generate search queries: {e}")
-        state["search_queries"] = []
-        return state
+        logger.error(f"Failed to generate/parse search queries: {e}")
+        # Fallback: generate a basic query from profile
+        fallback = f"{state.get('goal', 'insurance')} for {state.get('age', '')} year old in {state.get('location', 'India')} {state.get('family_size', '')}"
+        state["search_queries"] = [fallback.strip()]
 
     # 2. Execute Search
     market_findings = []
-    with DDGS() as ddgs:
-        for query in state["search_queries"]:
-            try:
-                # Get top 3 snippets for "basic", or attempt to crawl for "deep"
-                results = list(ddgs.text(query, max_results=3))
-                for r in results:
-                    snippet = f"Source: {r['href']}\nTitle: {r['title']}\nSnippet: {r['body']}"
-                    
-                    if state.get("search_depth") == "deep":
-                        # Attempt to crawl and ingest the actual page
-                        try:
-                            # Use httpx to fetch the page content and clean it
-                            async with httpx.AsyncClient(timeout=10.0) as client:
-                                resp = await client.get(r['href'], follow_redirects=True)
-                                if resp.status_code == 200:
-                                    # Simple HTML to text extraction (could use BeautifulSoup here)
-                                    from bs4 import BeautifulSoup
-                                    soup = BeautifulSoup(resp.text, "html.parser")
-                                    text = soup.get_text(separator="\n")
-                                    clean_text = "\n".join(line.strip() for line in text.splitlines() if line.strip())[:4000]
-                                    snippet += f"\nDeep Content: {clean_text}"
-                        except Exception as crawl_err:
-                            logger.warning(f"Failed deep crawl for {r['href']}: {crawl_err}")
+    
+    async def fallback_search(q: str):
+        url = "https://lite.duckduckgo.com/lite/"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, data={"q": q}, headers=headers)
+                if resp.status_code == 200:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    snippets = []
+                    for td in soup.find_all("td", class_="result-snippet"):
+                        snippets.append({"body": td.get_text(separator=" ", strip=True), "href": "lite_search", "title": "Search Result"})
+                    return snippets[:3]
+        except Exception:
+            pass
+        return []
 
-                    market_findings.append(snippet)
-            except Exception as search_err:
-                logger.error(f"Search failed for query '{query}': {search_err}")
+    for query in state["search_queries"]:
+        try:
+            # Attempt DDGS first
+            results = []
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=3))
+            
+            # If DDGS failed to return results (rate limited), use robust fallback
+            if not results:
+                results = await fallback_search(query)
+
+            for r in results:
+                snippet = f"Source: {r['href']}\nTitle: {r['title']}\nSnippet: {r['body']}"
+                
+                if state.get("search_depth") == "deep" and r['href'] != "lite_search":
+                    # Attempt to crawl and ingest the actual page
+                    try:
+                        async with httpx.AsyncClient(timeout=8.0) as client:
+                            resp = await client.get(r['href'], follow_redirects=True)
+                            if resp.status_code == 200:
+                                from bs4 import BeautifulSoup
+                                soup = BeautifulSoup(resp.text, "html.parser")
+                                text = soup.get_text(separator="\n")
+                                clean_text = "\n".join(line.strip() for line in text.splitlines() if line.strip())[:2500]
+                                snippet += f"\nDeep Content: {clean_text}"
+                    except Exception as crawl_err:
+                        logger.warning(f"Failed deep crawl for {r['href']}: {crawl_err}")
+
+                market_findings.append(snippet)
+        except Exception as search_err:
+            logger.error(f"Search failed for query '{query}': {search_err}")
+            # Ensure we try fallback even if DDGS throws an exception
+            results = await fallback_search(query)
+            for r in results:
+                market_findings.append(f"Source: {r['href']}\nTitle: {r['title']}\nSnippet: {r['body']}")
 
     state["market_context"] = market_findings
     return state
@@ -676,18 +762,36 @@ agent_graph = graph_builder.compile()
 
 @app.post("/chat/intake")
 async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=None)):
+    # ---- Restore session memory ----
+    prev = session_store.get(req.session_id, {})
+
+    # Merge: prefer explicit request fields, then session memory, then defaults
+    def pick(field, default=None):
+        val = getattr(req, field, None)
+        if val is not None:
+            return val
+        return prev.get(field, default)
+
+    # Build chat history: append the new user message to whatever we had before
+    chat_history = list(prev.get("chat_history", []))
+    # Add the previous agent question if we have one
+    prev_question = prev.get("next_question")
+    if prev_question:
+        chat_history.append(f"Agent: {prev_question}")
+    chat_history.append(f"User: {req.user_input}")
+
     initial_state = {
         "session_id": req.session_id,
         "user_input": req.user_input,
-        "chat_history": req.chat_history,
-        "age": req.age,
-        "family_size": req.family_size,
-        "pre_existing_conditions": req.pre_existing_conditions,
-        "budget": req.budget,
-        "location": req.location,
-        "goal": req.goal,
-        "search_depth": req.search_depth or "basic",
-        "documents": req.documents,
+        "chat_history": chat_history,
+        "age": pick("age"),
+        "family_size": pick("family_size"),
+        "pre_existing_conditions": pick("pre_existing_conditions"),
+        "budget": pick("budget"),
+        "location": pick("location"),
+        "goal": pick("goal"),
+        "search_depth": req.search_depth or prev.get("search_depth", "basic"),
+        "documents": pick("documents"),
         "auth_token": Authorization,
         "intake_complete": False,
         "retrieved_policies": [],
@@ -699,10 +803,32 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
 
     try:
         final_state = await agent_graph.ainvoke(initial_state)
-        # Avoid returning auth token to frontend
-        if "auth_token" in final_state:
-            del final_state["auth_token"]
-        return final_state
+
+        # ---- Persist session memory ----
+        session_store[req.session_id] = {
+            "age": final_state.get("age"),
+            "family_size": final_state.get("family_size"),
+            "pre_existing_conditions": final_state.get("pre_existing_conditions"),
+            "budget": final_state.get("budget"),
+            "location": final_state.get("location"),
+            "goal": final_state.get("goal"),
+            "search_depth": final_state.get("search_depth", "basic"),
+            "documents": final_state.get("documents"),
+            "chat_history": final_state.get("chat_history", []),
+            "next_question": final_state.get("next_question", ""),
+        }
+
+        # ---- Build frontend-friendly response ----
+        profile_fields = ["age", "family_size", "pre_existing_conditions", "budget", "location", "goal"]
+        extracted_profile = {k: final_state.get(k) for k in profile_fields if final_state.get(k)}
+
+        return {
+            "next_question": final_state.get("next_question", ""),
+            "intake_complete": final_state.get("intake_complete", False),
+            "final_recommendation": final_state.get("final_recommendation", ""),
+            "market_context": final_state.get("market_context", []),
+            "extracted_profile": extracted_profile,
+        }
     except Exception as e:
         logger.exception("Agent graph failed")
         raise HTTPException(status_code=500, detail=str(e))

@@ -1,0 +1,173 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Neo-Quant Terminal — charcoal canvas, electric lime, mono headings.
+   All colors HSL. Tokens only — no ad-hoc colors in components. */
+
+@layer base {
+  :root {
+    /* Light "paper terminal" */
+    --background: 40 18% 96%;
+    --foreground: 220 18% 12%;
+
+    --card: 40 22% 99%;
+    --card-foreground: 220 18% 12%;
+
+    --popover: 40 22% 99%;
+    --popover-foreground: 220 18% 12%;
+
+    --primary: 80 86% 45%;          /* electric lime */
+    --primary-foreground: 220 25% 8%;
+
+    --secondary: 220 14% 92%;
+    --secondary-foreground: 220 18% 14%;
+
+    --muted: 40 12% 90%;
+    --muted-foreground: 220 8% 38%;
+
+    --accent: 200 90% 48%;          /* signal cyan */
+    --accent-foreground: 220 25% 8%;
+
+    --destructive: 4 80% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --warning: 35 95% 55%;
+    --success: 145 65% 42%;
+
+    --border: 220 12% 84%;
+    --input: 220 12% 84%;
+    --ring: 80 86% 45%;
+
+    --radius: 0.25rem;
+
+    --grid-line: 220 14% 88%;
+    --terminal-glow: 80 86% 45%;
+
+    --gradient-signal: linear-gradient(135deg, hsl(80 86% 45%), hsl(150 70% 45%));
+    --gradient-canvas: radial-gradient(ellipse at top, hsl(40 25% 98%), hsl(40 12% 92%));
+    --shadow-quant: 0 1px 0 hsl(220 18% 12% / 0.06), 0 8px 30px -12px hsl(220 18% 12% / 0.18);
+    --shadow-glow: 0 0 0 1px hsl(var(--primary) / 0.4), 0 0 40px -8px hsl(var(--primary) / 0.4);
+
+    --sidebar-background: 40 18% 96%;
+    --sidebar-foreground: 220 18% 12%;
+    --sidebar-primary: 80 86% 45%;
+    --sidebar-primary-foreground: 220 25% 8%;
+    --sidebar-accent: 220 14% 92%;
+    --sidebar-accent-foreground: 220 18% 14%;
+    --sidebar-border: 220 12% 84%;
+    --sidebar-ring: 80 86% 45%;
+  }
+
+  .dark {
+    --background: 220 18% 7%;
+    --foreground: 60 12% 92%;
+
+    --card: 220 18% 9%;
+    --card-foreground: 60 12% 92%;
+
+    --popover: 220 20% 8%;
+    --popover-foreground: 60 12% 92%;
+
+    --primary: 80 92% 58%;
+    --primary-foreground: 220 25% 6%;
+
+    --secondary: 220 14% 14%;
+    --secondary-foreground: 60 10% 88%;
+
+    --muted: 220 14% 12%;
+    --muted-foreground: 60 6% 60%;
+
+    --accent: 195 95% 55%;
+    --accent-foreground: 220 25% 6%;
+
+    --destructive: 4 80% 58%;
+    --destructive-foreground: 0 0% 100%;
+
+    --warning: 35 95% 60%;
+    --success: 145 65% 50%;
+
+    --border: 220 14% 16%;
+    --input: 220 14% 16%;
+    --ring: 80 92% 58%;
+
+    --grid-line: 220 14% 14%;
+    --terminal-glow: 80 92% 58%;
+
+    --gradient-signal: linear-gradient(135deg, hsl(80 92% 58%), hsl(180 80% 50%));
+    --gradient-canvas: radial-gradient(ellipse at top, hsl(220 22% 10%), hsl(220 18% 6%));
+    --shadow-quant: 0 1px 0 hsl(0 0% 0% / 0.4), 0 12px 40px -12px hsl(0 0% 0% / 0.6);
+    --shadow-glow: 0 0 0 1px hsl(var(--primary) / 0.5), 0 0 60px -10px hsl(var(--primary) / 0.45);
+
+    --sidebar-background: 220 18% 7%;
+    --sidebar-foreground: 60 12% 92%;
+    --sidebar-primary: 80 92% 58%;
+    --sidebar-primary-foreground: 220 25% 6%;
+    --sidebar-accent: 220 14% 12%;
+    --sidebar-accent-foreground: 60 10% 88%;
+    --sidebar-border: 220 14% 16%;
+    --sidebar-ring: 80 92% 58%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  html { font-family: 'Inter', system-ui, sans-serif; }
+  body {
+    @apply bg-background text-foreground antialiased;
+    background-image:
+      linear-gradient(hsl(var(--grid-line) / 0.5) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--grid-line) / 0.5) 1px, transparent 1px);
+    background-size: 64px 64px;
+    background-position: -1px -1px;
+  }
+  .font-mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  .font-display { font-family: 'JetBrains Mono', ui-monospace, monospace; letter-spacing: -0.02em; }
+}
+
+@layer components {
+  .terminal-chip {
+    @apply inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-widest px-2 py-1 border border-border bg-card text-muted-foreground;
+  }
+  .terminal-chip-live::before {
+    content: '';
+    @apply inline-block w-1.5 h-1.5 rounded-full bg-primary;
+    box-shadow: 0 0 8px hsl(var(--primary));
+    animation: pulse-dot 1.4s ease-in-out infinite;
+  }
+  .quant-card {
+    @apply bg-card border border-border relative;
+    box-shadow: var(--shadow-quant);
+  }
+  .quant-card::before {
+    content: '';
+    @apply absolute top-0 left-0 w-2 h-2 border-t border-l border-primary;
+  }
+  .quant-card::after {
+    content: '';
+    @apply absolute bottom-0 right-0 w-2 h-2 border-b border-r border-primary;
+  }
+  .scanline {
+    background: linear-gradient(180deg, transparent 0%, hsl(var(--primary) / 0.06) 50%, transparent 100%);
+  }
+}
+
+@layer utilities {
+  .text-balance { text-wrap: balance; }
+  .bg-gradient-signal { background: var(--gradient-signal); }
+  .bg-gradient-canvas { background: var(--gradient-canvas); }
+  .shadow-glow { box-shadow: var(--shadow-glow); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+@keyframes ticker {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.animate-ticker { animation: ticker 40s linear infinite; }
