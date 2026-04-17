@@ -14,7 +14,15 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langgraph.graph import StateGraph, START, END
 
-from model import Prompt, llm, NomicEmbeddings, rewrite_llm, INTAKE_AGENT_PROMPT, RECOMMENDATION_AGENT_PROMPT, llm_json
+from fastapi.middleware.cors import CORSMiddleware
+from model import (
+    Prompt, llm, NomicEmbeddings, rewrite_llm, llm_json,
+    INTAKE_AGENT_PROMPT, RECOMMENDATION_AGENT_PROMPT,
+    POLICY_COMPARISON_PROMPT, SCENARIO_SIMULATOR_PROMPT,
+    VISUAL_SUMMARY_PROMPT, EXCLUSIONS_PROMPT,
+    SEARCH_QUERY_PROMPT, MARKET_ANALYSIS_PROMPT
+)
+from duckduckgo_search import DDGS
 from utils import parse_document_from_url, split_documents
 
 # ---------------------- CONFIG / TUNABLES ---------------------- #
@@ -42,10 +50,38 @@ MAX_CACHE_SIZE = 100
 faiss_cache: Dict[str, FAISS] = OrderedDict()  # doc_key -> faiss_db (simplified as requested)
 embedding_cache: Dict[int, List[float]] = OrderedDict()  # hash(text) -> embedding (to avoid re-embedding duplicates)
 
+# Add CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust this in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class QueryRequest(BaseModel):
     documents: str
     questions: List[str]
+
+
+class ComparisonRequest(BaseModel):
+    old_policy: str  # URL or text
+    new_policy: str  # URL or text
+
+
+class ScenarioRequest(BaseModel):
+    policy_url: str
+    scenario: str
+    user_profile: Optional[Dict] = None
+
+
+class VisualSummaryRequest(BaseModel):
+    policy_url: str
+
+
+class ExclusionsRequest(BaseModel):
+    policy_url: str
 
 
 class IntakeRequest(BaseModel):
@@ -56,6 +92,9 @@ class IntakeRequest(BaseModel):
     family_size: Optional[str] = None
     pre_existing_conditions: Optional[str] = None
     budget: Optional[str] = None
+    location: Optional[str] = None
+    goal: Optional[str] = None
+    search_depth: Optional[str] = "basic"  # "basic" (snippets) or "deep" (crawled)
     documents: Optional[str] = None
 
 
@@ -67,6 +106,11 @@ class AgentState(TypedDict):
     family_size: Optional[str]
     pre_existing_conditions: Optional[str]
     budget: Optional[str]
+    location: Optional[str]
+    goal: Optional[str]
+    search_depth: str
+    market_context: List[str]
+    search_queries: List[str]
     intake_complete: bool
     retrieved_policies: List[str]
     final_recommendation: str
@@ -302,60 +346,68 @@ async def home():
     return {"home": "This is our unified API endpoint"}
 
 
+# ----- FAISS Retrieval Helper -----
+async def get_or_build_faiss(documents_url: str, auth_token: str = None) -> FAISS:
+    """Gets cached FAISS or builds a new one from a URL."""
+    import hashlib
+    doc_key = hashlib.sha256(documents_url.encode()).hexdigest()
+
+    if doc_key in faiss_cache:
+        logger.info(f"Using cached FAISS for {documents_url[:50]}...")
+        return faiss_cache[doc_key]
+
+    # 1. Parse document
+    try:
+        parsed_docs = await parse_document_from_url(documents_url)
+    except Exception as e:
+        logger.error(f"Error parsing document: {e}")
+        raise HTTPException(status_code=400, detail=f"Error parsing document: {e}")
+
+    # 2. Split into chunks
+    try:
+        chunks = split_documents(parsed_docs)
+    except Exception as e:
+        logger.error(f"Error splitting document: {e}")
+        raise HTTPException(status_code=500, detail=f"Error splitting document: {e}")
+
+    text_list = [c.page_content for c in chunks]
+
+    # 3. Enrich URLs concurrently
+    enriched_text_list, found_urls = await enrich_document_with_urls_fast(text_list, auth_token,
+                                                                          max_conn=HTTP_MAX_CONNECTIONS)
+
+    # 4. Build embeddings + FAISS
+    try:
+        embedding_model = NomicEmbeddings()
+        enriched_chunks = [Document(page_content=t) for t in enriched_text_list]
+        db = await build_faiss_concurrent(enriched_chunks, embedding_model, batch_size=BATCH_SIZE,
+                                          max_concurrent=MAX_CONCURRENT_EMBED_CALLS)
+    except Exception as e:
+        logger.exception("Embedding/Vector store error")
+        raise HTTPException(status_code=500, detail=f"Embedding/Vector store error: {e}")
+
+    # 5. Conditional caching
+    if len(found_urls) == 0:
+        faiss_cache[doc_key] = db
+        if len(faiss_cache) > MAX_CACHE_SIZE:
+            faiss_cache.pop(next(iter(faiss_cache)))
+        logger.info("FAISS index built and cached")
+    else:
+        logger.info("Document contains URLs, skipping FAISS cache storage")
+
+    return db
+
+
+# ---------------------- API ---------------------- #
+@app.get("/")
+async def home():
+    return {"home": "This is our unified API endpoint"}
+
+
 @app.post("/hackrx/run")
 async def run_query(req: QueryRequest, Authorization: str = Header(default=None)):
     start = time.time()
-
-    # if not Authorization:
-    #     raise HTTPException(status_code=401, detail="Missing Authorization header")
-
-    # Hash doc_key with auth for security (prevent cross-user cache pollution)
-    import hashlib
-    doc_key = hashlib.sha256(req.documents.encode()).hexdigest()
-
-    if doc_key in faiss_cache:
-        db = faiss_cache[doc_key]
-        logger.info("Using cached FAISS retriever")
-    else:
-        # 1. Parse document
-        try:
-            parsed_docs = await parse_document_from_url(req.documents)
-        except Exception as e:
-            logger.error(f"Error parsing document: {e}")
-            raise HTTPException(status_code=400, detail=f"Error parsing document: {e}")
-
-        # 2. Split into chunks
-        try:
-            chunks = split_documents(parsed_docs)
-        except Exception as e:
-            logger.error(f"Error splitting document: {e}")
-            raise HTTPException(status_code=500, detail=f"Error splitting document: {e}")
-
-        text_list = [c.page_content for c in chunks]
-
-        # 3. Enrich URLs concurrently (now returns found_urls for conditional check)
-        enriched_text_list, found_urls = await enrich_document_with_urls_fast(text_list, Authorization,
-                                                                              max_conn=HTTP_MAX_CONNECTIONS)
-
-        # 4. Build embeddings + FAISS
-        try:
-            embedding_model = NomicEmbeddings()
-            enriched_chunks = [Document(page_content=t) for t in enriched_text_list]
-            db = await build_faiss_concurrent(enriched_chunks, embedding_model, batch_size=BATCH_SIZE,
-                                              max_concurrent=MAX_CONCURRENT_EMBED_CALLS)
-        except Exception as e:
-            logger.exception("Embedding/Vector store error")
-            raise HTTPException(status_code=500, detail=f"Embedding/Vector store error: {e}")
-
-        # 5. Conditional caching: only cache if no HTTP/HTTPS URLs found in the document content
-        if len(found_urls) == 0:
-            faiss_cache[doc_key] = db
-            if len(faiss_cache) > MAX_CACHE_SIZE:
-                faiss_cache.pop(next(iter(faiss_cache)))  # Evict oldest
-            logger.info("FAISS index built and cached (no URLs in document content)")
-        else:
-            logger.info("Document content contains HTTP/HTTPS URLs, skipping FAISS cache storage")
-
+    db = await get_or_build_faiss(req.documents, Authorization)
     retriever = db.as_retriever(search_type="mmr", search_kwargs={"k": 5, "lambda_mult": 0.3})
 
     # Process questions in parallel
@@ -384,6 +436,73 @@ async def run_query(req: QueryRequest, Authorization: str = Header(default=None)
     return {"answers": answers}
 
 
+@app.post("/compare_policies")
+async def compare_policies(req: ComparisonRequest, Authorization: str = Header(default=None)):
+    """Deep comparison of two policies across benefits, exclusions, and scenarios."""
+    async def get_text(source: str):
+        if source.startswith("http"):
+            db = await get_or_build_faiss(source, Authorization)
+            # Retrieve broad context for comparison (using a general query)
+            docs = await asyncio.to_thread(db.as_retriever(search_kwargs={"k": 10}).invoke, "summary of coverage, exclusions, and benefits")
+            return "\n".join([d.page_content for d in docs])
+        return source
+
+    old_text, new_text = await asyncio.gather(get_text(req.old_policy), get_text(req.new_policy))
+
+    chain = POLICY_COMPARISON_PROMPT | llm_json
+    response = await chain.ainvoke({"old_policy": old_text[:10000], "new_policy": new_text[:10000]})
+    
+    return json.loads(response.content if hasattr(response, "content") else response)
+
+
+@app.post("/simulate_scenario")
+async def simulate_scenario(req: ScenarioRequest, Authorization: str = Header(default=None)):
+    """Adjudicate a hypothetical scenario against a policy."""
+    db = await get_or_build_faiss(req.policy_url, Authorization)
+    retriever = db.as_retriever(search_kwargs={"k": 5})
+    
+    # Retrieve context relevant to the scenario
+    context_docs = await asyncio.to_thread(retriever.invoke, req.scenario)
+    context = "\n".join([d.page_content for d in context_docs])
+    
+    chain = SCENARIO_SIMULATOR_PROMPT | llm_json
+    response = await chain.ainvoke({
+        "context": context,
+        "user_profile": json.dumps(req.user_profile or {}),
+        "scenario": req.scenario
+    })
+    
+    return json.loads(response.content if hasattr(response, "content") else response)
+
+
+@app.post("/get_visual_summary")
+async def get_visual_summary(req: VisualSummaryRequest, Authorization: str = Header(default=None)):
+    """Extract financial metrics for visual dashboard."""
+    db = await get_or_build_faiss(req.policy_url, Authorization)
+    # Get high-level summary parts
+    docs = await asyncio.to_thread(db.as_retriever(search_kwargs={"k": 8}).invoke, "financial summary, deductible, copay, out of pocket max")
+    context = "\n".join([d.page_content for d in docs])
+    
+    chain = VISUAL_SUMMARY_PROMPT | llm_json
+    response = await chain.ainvoke({"context": context})
+    
+    return json.loads(response.content if hasattr(response, "content") else response)
+
+
+@app.post("/get_exclusions")
+async def get_exclusions(req: ExclusionsRequest, Authorization: str = Header(default=None)):
+    """Identify policy traps and exclusions."""
+    db = await get_or_build_faiss(req.policy_url, Authorization)
+    # Search specifically for exclusions
+    docs = await asyncio.to_thread(db.as_retriever(search_kwargs={"k": 8}).invoke, "exclusions, what is not covered, limitations, traps")
+    context = "\n".join([d.page_content for d in docs])
+    
+    chain = EXCLUSIONS_PROMPT | llm_json
+    response = await chain.ainvoke({"context": context})
+    
+    return json.loads(response.content if hasattr(response, "content") else response)
+
+
 # ---------------------- Agent Nodes & LangGraph ---------------------- #
 
 async def information_gatherer_node(state: AgentState) -> AgentState:
@@ -394,7 +513,9 @@ async def information_gatherer_node(state: AgentState) -> AgentState:
         "age": state.get("age") or "",
         "family_size": state.get("family_size") or "",
         "pre_existing_conditions": state.get("pre_existing_conditions") or "",
-        "budget": state.get("budget") or ""
+        "budget": state.get("budget") or "",
+        "location": state.get("location") or "",
+        "goal": state.get("goal") or ""
     })
 
     try:
@@ -408,12 +529,71 @@ async def information_gatherer_node(state: AgentState) -> AgentState:
     if "pre_existing_conditions" in data and data["pre_existing_conditions"]: state["pre_existing_conditions"] = data[
         "pre_existing_conditions"]
     if "budget" in data and data["budget"]: state["budget"] = data["budget"]
+    if "location" in data and data["location"]: state["location"] = data["location"]
+    if "goal" in data and data["goal"]: state["goal"] = data["goal"]
 
     if "next_question" in data:
         state["next_question"] = data["next_question"]
 
     state["intake_complete"] = data.get("intake_complete", False)
+    state["market_context"] = state.get("market_context", [])
+    state["search_queries"] = state.get("search_queries", [])
 
+    return state
+
+
+async def market_search_node(state: AgentState) -> AgentState:
+    """Generates search queries and fetches real-time market data."""
+    # 1. Generate Query strings
+    chain = SEARCH_QUERY_PROMPT | llm_json
+    response = await chain.ainvoke({
+        "age": state.get("age") or "unknown",
+        "family_size": state.get("family_size") or "unknown",
+        "location": state.get("location") or "unknown",
+        "goal": state.get("goal") or "unknown"
+    })
+
+    try:
+        queries = json.loads(response.content if hasattr(response, "content") else response)
+        if isinstance(queries, dict) and "queries" in queries:
+            queries = queries["queries"]
+        state["search_queries"] = queries
+    except Exception as e:
+        logger.error(f"Failed to generate search queries: {e}")
+        state["search_queries"] = []
+        return state
+
+    # 2. Execute Search
+    market_findings = []
+    with DDGS() as ddgs:
+        for query in state["search_queries"]:
+            try:
+                # Get top 3 snippets for "basic", or attempt to crawl for "deep"
+                results = list(ddgs.text(query, max_results=3))
+                for r in results:
+                    snippet = f"Source: {r['href']}\nTitle: {r['title']}\nSnippet: {r['body']}"
+                    
+                    if state.get("search_depth") == "deep":
+                        # Attempt to crawl and ingest the actual page
+                        try:
+                            # Use httpx to fetch the page content and clean it
+                            async with httpx.AsyncClient(timeout=10.0) as client:
+                                resp = await client.get(r['href'], follow_redirects=True)
+                                if resp.status_code == 200:
+                                    # Simple HTML to text extraction (could use BeautifulSoup here)
+                                    from bs4 import BeautifulSoup
+                                    soup = BeautifulSoup(resp.text, "html.parser")
+                                    text = soup.get_text(separator="\n")
+                                    clean_text = "\n".join(line.strip() for line in text.splitlines() if line.strip())[:4000]
+                                    snippet += f"\nDeep Content: {clean_text}"
+                        except Exception as crawl_err:
+                            logger.warning(f"Failed deep crawl for {r['href']}: {crawl_err}")
+
+                    market_findings.append(snippet)
+            except Exception as search_err:
+                logger.error(f"Search failed for query '{query}': {search_err}")
+
+    state["market_context"] = market_findings
     return state
 
 
@@ -424,41 +604,17 @@ async def policy_retriever_node(state: AgentState) -> AgentState:
         state["retrieved_policies"] = []
         return state
 
-    import hashlib
-    doc_key = hashlib.sha256(doc_url.encode()).hexdigest()
-
-    # Reuse FAISS caching logic
-    if doc_key in faiss_cache:
-        db = faiss_cache[doc_key]
-        logger.info("Using cached FAISS retriever for agent")
-    else:
-        try:
-            parsed_docs = await parse_document_from_url(doc_url)
-            chunks = split_documents(parsed_docs)
-            text_list = [c.page_content for c in chunks]
-
-            auth = state.get("auth_token")
-            enriched_text_list, found_urls = await enrich_document_with_urls_fast(text_list, auth,
-                                                                                  max_conn=HTTP_MAX_CONNECTIONS)
-
-            embedding_model = NomicEmbeddings()
-            enriched_chunks = [Document(page_content=t) for t in enriched_text_list]
-            db = await build_faiss_concurrent(enriched_chunks, embedding_model, batch_size=BATCH_SIZE,
-                                              max_concurrent=MAX_CONCURRENT_EMBED_CALLS)
-
-            if len(found_urls) == 0:
-                faiss_cache[doc_key] = db
-                if len(faiss_cache) > MAX_CACHE_SIZE:
-                    faiss_cache.pop(next(iter(faiss_cache)))
-        except Exception as e:
-            logger.error(f"Failed to retrieve/build FAISS in agent block: {e}")
-            state["retrieved_policies"] = []
-            return state
+    try:
+        db = await get_or_build_faiss(doc_url, state.get("auth_token"))
+    except Exception as e:
+        logger.error(f"Failed to retrieve/build FAISS in agent block: {e}")
+        state["retrieved_policies"] = []
+        return state
 
     retriever = db.as_retriever(search_type="mmr", search_kwargs={"k": 5, "lambda_mult": 0.3})
 
     # Synthesize the search query based on agent parameters
-    search_query = f"insurance policy for age {state.get('age')}, family size {state.get('family_size')}, budget {state.get('budget')}, limitations: {state.get('pre_existing_conditions')}"
+    search_query = f"insurance policy details for age {state.get('age')}, family {state.get('family_size')}, profile: {state.get('pre_existing_conditions')}"
 
     try:
         context_docs = await asyncio.to_thread(retriever.invoke, search_query)
@@ -473,17 +629,22 @@ async def policy_retriever_node(state: AgentState) -> AgentState:
 
 
 async def recommendation_node(state: AgentState) -> AgentState:
-    chain = RECOMMENDATION_AGENT_PROMPT | llm
+    chain = MARKET_ANALYSIS_PROMPT | llm
 
     context = state.get("retrieved_policies", [])
-    context_str = context[0] if context else "No policies available."
+    context_str = context[0] if context else "No internal policies provided."
+    
+    market_str = "\n---\n".join(state.get("market_context", [])) or "No real-time market data found."
 
     response = await chain.ainvoke({
         "context": context_str,
+        "market_data": market_str,
         "age": state.get("age") or "Not specified",
         "family_size": state.get("family_size") or "Not specified",
         "pre_existing_conditions": state.get("pre_existing_conditions") or "Not specified",
-        "budget": state.get("budget") or "Not specified"
+        "budget": state.get("budget") or "Not specified",
+        "location": state.get("location") or "Not specified",
+        "goal": state.get("goal") or "Not specified"
     })
 
     state["final_recommendation"] = clean_output(response)
@@ -492,7 +653,7 @@ async def recommendation_node(state: AgentState) -> AgentState:
 
 def should_continue(state: AgentState):
     if state.get("intake_complete"):
-        return "policy_retriever_node"
+        return "market_search_node"  # Always prioritize market search
     else:
         return END
 
@@ -500,11 +661,13 @@ def should_continue(state: AgentState):
 # Compile Graph
 graph_builder = StateGraph(AgentState)
 graph_builder.add_node("information_gatherer_node", information_gatherer_node)
+graph_builder.add_node("market_search_node", market_search_node)
 graph_builder.add_node("policy_retriever_node", policy_retriever_node)
 graph_builder.add_node("recommendation_node", recommendation_node)
 
 graph_builder.add_edge(START, "information_gatherer_node")
 graph_builder.add_conditional_edges("information_gatherer_node", should_continue)
+graph_builder.add_edge("market_search_node", "policy_retriever_node")
 graph_builder.add_edge("policy_retriever_node", "recommendation_node")
 graph_builder.add_edge("recommendation_node", END)
 
@@ -521,10 +684,15 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
         "family_size": req.family_size,
         "pre_existing_conditions": req.pre_existing_conditions,
         "budget": req.budget,
+        "location": req.location,
+        "goal": req.goal,
+        "search_depth": req.search_depth or "basic",
         "documents": req.documents,
         "auth_token": Authorization,
         "intake_complete": False,
         "retrieved_policies": [],
+        "market_context": [],
+        "search_queries": [],
         "final_recommendation": "",
         "next_question": ""
     }
