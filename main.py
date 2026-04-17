@@ -11,7 +11,7 @@ from typing import List, Dict, TypedDict, Optional, Annotated
 from dotenv import load_dotenv
 from langchain_core.prompts import PromptTemplate
 from langchain_community.vectorstores import FAISS
-from langchain.schema import Document
+from langchain_core.documents import Document
 from langgraph.graph import StateGraph, START, END
 
 from model import Prompt, llm, NomicEmbeddings, rewrite_llm, INTAKE_AGENT_PROMPT, RECOMMENDATION_AGENT_PROMPT, llm_json
@@ -24,10 +24,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Embedding batching & concurrency (tune based on your API limits)
-BATCH_SIZE = 128                 # number of chunks per embedding request
-MAX_CONCURRENT_EMBED_CALLS = 3   # concurrency of simultaneous embedding API calls
-EMBED_ROG_RETRY_MAX = 3          # retry attempts for 429s or transient failures
-EMBED_RETRY_BACKOFF_BASE = 0.6   # exponential backoff base (seconds)
+BATCH_SIZE = 128  # number of chunks per embedding request
+MAX_CONCURRENT_EMBED_CALLS = 3  # concurrency of simultaneous embedding API calls
+EMBED_ROG_RETRY_MAX = 3  # retry attempts for 429s or transient failures
+EMBED_RETRY_BACKOFF_BASE = 0.6  # exponential backoff base (seconds)
 
 # HTTP fetching limits
 HTTP_MAX_CONNECTIONS = 20
@@ -42,9 +42,11 @@ MAX_CACHE_SIZE = 100
 faiss_cache: Dict[str, FAISS] = OrderedDict()  # doc_key -> faiss_db (simplified as requested)
 embedding_cache: Dict[int, List[float]] = OrderedDict()  # hash(text) -> embedding (to avoid re-embedding duplicates)
 
+
 class QueryRequest(BaseModel):
     documents: str
     questions: List[str]
+
 
 class IntakeRequest(BaseModel):
     session_id: str
@@ -55,6 +57,7 @@ class IntakeRequest(BaseModel):
     pre_existing_conditions: Optional[str] = None
     budget: Optional[str] = None
     documents: Optional[str] = None
+
 
 class AgentState(TypedDict):
     session_id: str
@@ -71,6 +74,7 @@ class AgentState(TypedDict):
     next_question: Optional[str]
     auth_token: Optional[str]
 
+
 # ---------------------- Helpers ---------------------- #
 def clean_output(answer):
     """Remove <think> tags and excessive spacing."""
@@ -80,6 +84,7 @@ def clean_output(answer):
         content = str(answer)
     content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
     return re.sub(r"\n{3,}", "\n\n", content)
+
 
 async def rewrite_question(original_question: str, first_doc_chunk: str = "") -> str:
     """Rewrite question for better retrieval (kept optional)."""
@@ -117,6 +122,7 @@ Rewritten Query:
         logger.warning(f"Rewrite error, using original question: {e}")
         return original_question
 
+
 # ----- Robust HTTP fetch for URLs (concurrent, limited, with retries) -----
 async def fetch_url(client: httpx.AsyncClient, url: str, auth_token: str = None) -> str:
     """Fetch URL content (with optional Authorization) using provided client, with retries."""
@@ -139,7 +145,8 @@ async def fetch_url(client: httpx.AsyncClient, url: str, auth_token: str = None)
             last_exc = e
             if e.response.status_code == 429:
                 backoff = HTTP_RETRY_BACKOFF_BASE * (2 ** attempt) + (attempt * 0.1)
-                logger.warning(f"Rate-limited fetching {url} (attempt {attempt+1}/{HTTP_RETRY_MAX}). Backing off {backoff:.2f}s.")
+                logger.warning(
+                    f"Rate-limited fetching {url} (attempt {attempt + 1}/{HTTP_RETRY_MAX}). Backing off {backoff:.2f}s.")
                 await asyncio.sleep(backoff)
                 continue
             raise
@@ -150,7 +157,9 @@ async def fetch_url(client: httpx.AsyncClient, url: str, auth_token: str = None)
             await asyncio.sleep(backoff)
     return f"<ERROR fetching {url}: {last_exc}>"
 
-async def enrich_document_with_urls_fast(text_chunks: List[str], auth_token: str = None, max_conn: int = HTTP_MAX_CONNECTIONS) -> tuple[List[str], list[str]]:
+
+async def enrich_document_with_urls_fast(text_chunks: List[str], auth_token: str = None,
+                                         max_conn: int = HTTP_MAX_CONNECTIONS) -> tuple[List[str], list[str]]:
     """Find all unique URLs, fetch them concurrently, append their content once per URL. Returns enriched chunks and found_urls."""
     url_pattern = r"https?://[^\s)>\]]+"
     found_urls = list(dict.fromkeys(re.findall(url_pattern, " ".join(text_chunks))))  # Unique in order
@@ -182,13 +191,16 @@ async def enrich_document_with_urls_fast(text_chunks: List[str], auth_token: str
                 appended_urls.add(u)
     return enriched_chunks, found_urls
 
+
 # ----- Embedding helpers: dedupe + concurrency + retry -----
 def _hash_text_to_int(text: str) -> int:
     """Stable int hash for mapping into embedding_cache."""
     import hashlib
     return int.from_bytes(hashlib.sha1(text.encode("utf-8")).digest()[:8], "big")
 
-async def _embed_with_retries(embedding_model, texts: List[str], retries=EMBED_ROG_RETRY_MAX, backoff_base=EMBED_RETRY_BACKOFF_BASE):
+
+async def _embed_with_retries(embedding_model, texts: List[str], retries=EMBED_ROG_RETRY_MAX,
+                              backoff_base=EMBED_RETRY_BACKOFF_BASE):
     """Call embedding_model.embed_documents in a thread with retries on transient errors."""
     last_exc = None
     for attempt in range(retries):
@@ -200,7 +212,8 @@ async def _embed_with_retries(embedding_model, texts: List[str], retries=EMBED_R
             s = str(e).lower()
             if "429" in s or "rate" in s or "too many" in s or "try again" in s:
                 backoff = backoff_base * (2 ** attempt) + (attempt * 0.1)
-                logger.warning(f"Embedding call rate-limited or transient error (attempt {attempt+1}/{retries}). Backing off {backoff:.2f}s. err={e}")
+                logger.warning(
+                    f"Embedding call rate-limited or transient error (attempt {attempt + 1}/{retries}). Backing off {backoff:.2f}s. err={e}")
                 await asyncio.sleep(backoff)
                 continue
             else:
@@ -208,7 +221,9 @@ async def _embed_with_retries(embedding_model, texts: List[str], retries=EMBED_R
     logger.error(f"Embedding failed after {retries} attempts: {last_exc}")
     raise last_exc
 
-async def build_faiss_concurrent(docs: List[Document], embedding_model, batch_size: int = BATCH_SIZE, max_concurrent: int = MAX_CONCURRENT_EMBED_CALLS) -> FAISS:
+
+async def build_faiss_concurrent(docs: List[Document], embedding_model, batch_size: int = BATCH_SIZE,
+                                 max_concurrent: int = MAX_CONCURRENT_EMBED_CALLS) -> FAISS:
     """
     Embed documents in parallel batches with concurrency control and deduplication.
     Returns a langchain FAISS vectorstore built from (text, embedding) pairs.
@@ -223,7 +238,8 @@ async def build_faiss_concurrent(docs: List[Document], embedding_model, batch_si
             unique_texts.append(txt)
         text_to_original_indices[txt].append(i)
 
-    logger.info(f"Embedding {len(unique_texts)} unique chunks (from {len(docs)} total chunks). Batch size={batch_size}, concurrency={max_concurrent}")
+    logger.info(
+        f"Embedding {len(unique_texts)} unique chunks (from {len(docs)} total chunks). Batch size={batch_size}, concurrency={max_concurrent}")
 
     # 2. Check embedding_cache
     texts_to_embed = []
@@ -279,10 +295,12 @@ async def build_faiss_concurrent(docs: List[Document], embedding_model, batch_si
 
     return vs
 
+
 # ---------------------- API ---------------------- #
 @app.get("/")
 async def home():
     return {"home": "This is our unified API endpoint"}
+
 
 @app.post("/hackrx/run")
 async def run_query(req: QueryRequest, Authorization: str = Header(default=None)):
@@ -316,13 +334,15 @@ async def run_query(req: QueryRequest, Authorization: str = Header(default=None)
         text_list = [c.page_content for c in chunks]
 
         # 3. Enrich URLs concurrently (now returns found_urls for conditional check)
-        enriched_text_list, found_urls = await enrich_document_with_urls_fast(text_list, Authorization, max_conn=HTTP_MAX_CONNECTIONS)
+        enriched_text_list, found_urls = await enrich_document_with_urls_fast(text_list, Authorization,
+                                                                              max_conn=HTTP_MAX_CONNECTIONS)
 
         # 4. Build embeddings + FAISS
         try:
             embedding_model = NomicEmbeddings()
             enriched_chunks = [Document(page_content=t) for t in enriched_text_list]
-            db = await build_faiss_concurrent(enriched_chunks, embedding_model, batch_size=BATCH_SIZE, max_concurrent=MAX_CONCURRENT_EMBED_CALLS)
+            db = await build_faiss_concurrent(enriched_chunks, embedding_model, batch_size=BATCH_SIZE,
+                                              max_concurrent=MAX_CONCURRENT_EMBED_CALLS)
         except Exception as e:
             logger.exception("Embedding/Vector store error")
             raise HTTPException(status_code=500, detail=f"Embedding/Vector store error: {e}")
@@ -363,6 +383,7 @@ async def run_query(req: QueryRequest, Authorization: str = Header(default=None)
     logger.info(f"Total run_query time: {elapsed:.2f}s")
     return {"answers": answers}
 
+
 # ---------------------- Agent Nodes & LangGraph ---------------------- #
 
 async def information_gatherer_node(state: AgentState) -> AgentState:
@@ -375,24 +396,26 @@ async def information_gatherer_node(state: AgentState) -> AgentState:
         "pre_existing_conditions": state.get("pre_existing_conditions") or "",
         "budget": state.get("budget") or ""
     })
-    
+
     try:
         data = json.loads(response.content if hasattr(response, "content") else response)
     except Exception as e:
         logger.error(f"Failed to parse JSON from information_gatherer: {e}")
         data = {}
-        
+
     if "age" in data and data["age"]: state["age"] = data["age"]
     if "family_size" in data and data["family_size"]: state["family_size"] = data["family_size"]
-    if "pre_existing_conditions" in data and data["pre_existing_conditions"]: state["pre_existing_conditions"] = data["pre_existing_conditions"]
+    if "pre_existing_conditions" in data and data["pre_existing_conditions"]: state["pre_existing_conditions"] = data[
+        "pre_existing_conditions"]
     if "budget" in data and data["budget"]: state["budget"] = data["budget"]
-    
+
     if "next_question" in data:
         state["next_question"] = data["next_question"]
-        
+
     state["intake_complete"] = data.get("intake_complete", False)
-    
+
     return state
+
 
 async def policy_retriever_node(state: AgentState) -> AgentState:
     doc_url = state.get("documents")
@@ -400,7 +423,7 @@ async def policy_retriever_node(state: AgentState) -> AgentState:
         logger.warning("No documents URL provided in state, skipping retrieval.")
         state["retrieved_policies"] = []
         return state
-        
+
     import hashlib
     doc_key = hashlib.sha256(doc_url.encode()).hexdigest()
 
@@ -413,14 +436,16 @@ async def policy_retriever_node(state: AgentState) -> AgentState:
             parsed_docs = await parse_document_from_url(doc_url)
             chunks = split_documents(parsed_docs)
             text_list = [c.page_content for c in chunks]
-            
+
             auth = state.get("auth_token")
-            enriched_text_list, found_urls = await enrich_document_with_urls_fast(text_list, auth, max_conn=HTTP_MAX_CONNECTIONS)
-            
+            enriched_text_list, found_urls = await enrich_document_with_urls_fast(text_list, auth,
+                                                                                  max_conn=HTTP_MAX_CONNECTIONS)
+
             embedding_model = NomicEmbeddings()
             enriched_chunks = [Document(page_content=t) for t in enriched_text_list]
-            db = await build_faiss_concurrent(enriched_chunks, embedding_model, batch_size=BATCH_SIZE, max_concurrent=MAX_CONCURRENT_EMBED_CALLS)
-            
+            db = await build_faiss_concurrent(enriched_chunks, embedding_model, batch_size=BATCH_SIZE,
+                                              max_concurrent=MAX_CONCURRENT_EMBED_CALLS)
+
             if len(found_urls) == 0:
                 faiss_cache[doc_key] = db
                 if len(faiss_cache) > MAX_CACHE_SIZE:
@@ -431,10 +456,10 @@ async def policy_retriever_node(state: AgentState) -> AgentState:
             return state
 
     retriever = db.as_retriever(search_type="mmr", search_kwargs={"k": 5, "lambda_mult": 0.3})
-    
+
     # Synthesize the search query based on agent parameters
     search_query = f"insurance policy for age {state.get('age')}, family size {state.get('family_size')}, budget {state.get('budget')}, limitations: {state.get('pre_existing_conditions')}"
-    
+
     try:
         context_docs = await asyncio.to_thread(retriever.invoke, search_query)
         context = "\n".join([doc.page_content for doc in context_docs]) if context_docs else ""
@@ -443,15 +468,16 @@ async def policy_retriever_node(state: AgentState) -> AgentState:
     except Exception as e:
         logger.error(f"Failed to query FAISS retriever: {e}")
         state["retrieved_policies"] = []
-        
+
     return state
+
 
 async def recommendation_node(state: AgentState) -> AgentState:
     chain = RECOMMENDATION_AGENT_PROMPT | llm
-    
+
     context = state.get("retrieved_policies", [])
     context_str = context[0] if context else "No policies available."
-    
+
     response = await chain.ainvoke({
         "context": context_str,
         "age": state.get("age") or "Not specified",
@@ -459,15 +485,17 @@ async def recommendation_node(state: AgentState) -> AgentState:
         "pre_existing_conditions": state.get("pre_existing_conditions") or "Not specified",
         "budget": state.get("budget") or "Not specified"
     })
-    
+
     state["final_recommendation"] = clean_output(response)
     return state
+
 
 def should_continue(state: AgentState):
     if state.get("intake_complete"):
         return "policy_retriever_node"
     else:
         return END
+
 
 # Compile Graph
 graph_builder = StateGraph(AgentState)
@@ -481,6 +509,7 @@ graph_builder.add_edge("policy_retriever_node", "recommendation_node")
 graph_builder.add_edge("recommendation_node", END)
 
 agent_graph = graph_builder.compile()
+
 
 @app.post("/chat/intake")
 async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=None)):
@@ -499,7 +528,7 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
         "final_recommendation": "",
         "next_question": ""
     }
-    
+
     try:
         final_state = await agent_graph.ainvoke(initial_state)
         # Avoid returning auth token to frontend

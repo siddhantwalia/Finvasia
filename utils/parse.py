@@ -15,7 +15,7 @@ import httpx
 from PIL import Image
 from bs4 import BeautifulSoup  # <-- Added for HTML parsing
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document as LCDocument
 from langchain_community.document_loaders import (
     PyMuPDFLoader,
