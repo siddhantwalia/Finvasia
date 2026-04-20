@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Shell } from "@/components/layout/Shell";
 import { PageHeader } from "@/components/PageHeader";
-import { api, IntakeRequest, IntakeResponse, SearchDepth } from "@/lib/api";
+import { api, IntakeRequest, IntakeResponse } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import ReactMarkdown from "react-markdown";
 import { Loader2, Send, RotateCcw } from "lucide-react";
@@ -19,7 +19,6 @@ const Intake = () => {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [depth, setDepth] = useState<SearchDepth>("basic");
   const [docUrl, setDocUrl] = useState("");
   const [profile, setProfile] = useState<Record<string, unknown>>({});
   const [done, setDone] = useState(false);
@@ -42,7 +41,7 @@ const Intake = () => {
       const body: IntakeRequest = {
         session_id: sessionId,
         user_input: text,
-        search_depth: depth,
+        search_depth: "basic",
         documents: docUrl || undefined,
       };
       const res = await api.intake(body);
@@ -209,22 +208,6 @@ const Intake = () => {
             )}
           </div>
 
-          <div className="quant-card p-4 space-y-3">
-            <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">// search_depth</div>
-            <div className="grid grid-cols-2 gap-px bg-border border border-border">
-              {(["basic", "deep"] as const).map((d) => (
-                <button
-                  key={d}
-                  onClick={() => setDepth(d)}
-                  className={`py-2 font-mono text-[11px] uppercase tracking-widest ${
-                    depth === d ? "bg-primary text-primary-foreground" : "bg-card text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {d}
-                </button>
-              ))}
-            </div>
-          </div>
 
           <div className="quant-card p-4 space-y-2">
             <label className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">// documents (optional)</label>

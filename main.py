@@ -28,10 +28,12 @@ from model import (
     MARKET_REFINE_PROMPT
 )
 from duckduckgo_search import DDGS
+from serpapi import GoogleSearch
 from utils import parse_document_from_url, split_documents
 
 # ---------------------- CONFIG / TUNABLES ---------------------- #
 load_dotenv()
+SERP_API_KEY = os.getenv("SERP_API_KEY")
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -130,6 +132,7 @@ class AgentState(TypedDict):
     next_question: Optional[str]
     auth_token: Optional[str]
     refined_links: List[Dict[str, str]]
+    recommendation_generated: bool
 
 
 # ---------------------- Helpers ---------------------- #
@@ -473,30 +476,117 @@ async def simulate_scenario(req: ScenarioRequest, Authorization: str = Header(de
 
 @app.post("/get_visual_summary")
 async def get_visual_summary(req: VisualSummaryRequest, Authorization: str = Header(default=None)):
-    """Extract financial metrics for visual dashboard."""
-    db = await get_or_build_faiss(req.policy_url, Authorization)
-    # Get high-level summary parts
-    docs = await asyncio.to_thread(db.as_retriever(search_kwargs={"k": 8}).invoke, "financial summary, deductible, copay, out of pocket max")
-    context = "\n".join([d.page_content for d in docs])
+    """Extract financial metrics for visual dashboard using table-aware RAG."""
+    # Parse document directly to get raw pages for re-chunking
+    try:
+        parsed_docs = await parse_document_from_url(req.policy_url)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error parsing document: {e}")
+
+    # Re-chunk with SMALL chunks (300 chars) so table rows are individual units
+    # Financial PDFs have tables where each row is key data — large chunks lump them together
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from model import NomicEmbeddings
+    small_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=30)
+    small_chunks = small_splitter.split_documents(parsed_docs)
     
+    embedding_model = NomicEmbeddings()
+    small_db = await build_faiss_concurrent(small_chunks, embedding_model, batch_size=64, max_concurrent=3)
+    
+    retriever = small_db.as_retriever(search_kwargs={"k": 8})
+
+    # 3 targeted searches covering the 3 financial data categories
+    queries = [
+        "Sum Insured coverage limit face value total insured amount ₹",
+        "deductible excess co-payment copay coinsurance room rent ICU limit",
+        "waiting period pre-existing disease maternity specific illness exclusion",
+    ]
+
+    seen, unique_content = set(), []
+    for q in queries:
+        for doc in await asyncio.to_thread(retriever.invoke, q):
+            if doc.page_content not in seen:
+                unique_content.append(doc.page_content)
+                seen.add(doc.page_content)
+
+    # Hard cap: keep under ~4,500 chars (~1,125 tokens) for context
+    # leaving ~4,875 tokens for the prompt template + JSON output
+    MAX_CONTEXT_CHARS = 4500
+    context = "\n".join(unique_content)
+    if len(context) > MAX_CONTEXT_CHARS:
+        context = context[:MAX_CONTEXT_CHARS]
+
+    logger.info(f"Visual summary: {len(small_chunks)} small chunks, {len(unique_content)} retrieved, context={len(context)} chars")
+
     chain = VISUAL_SUMMARY_PROMPT | llm_json
     response = await chain.ainvoke({"context": context})
-    
+
     return json.loads(response.content if hasattr(response, "content") else response)
 
 
 @app.post("/get_exclusions")
 async def get_exclusions(req: ExclusionsRequest, Authorization: str = Header(default=None)):
-    """Identify policy traps and exclusions."""
-    db = await get_or_build_faiss(req.policy_url, Authorization)
-    # Search specifically for exclusions
-    docs = await asyncio.to_thread(db.as_retriever(search_kwargs={"k": 8}).invoke, "exclusions, what is not covered, limitations, traps")
-    context = "\n".join([d.page_content for d in docs])
-    
+    """Identify policy traps and exclusions with consistent results."""
+    # Parse fresh for targeted small-chunk RAG (same approach as visual_summary)
+    try:
+        parsed_docs = await parse_document_from_url(req.policy_url)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error parsing document: {e}")
+
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from model import NomicEmbeddings
+    small_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=30)
+    small_chunks = small_splitter.split_documents(parsed_docs)
+    embedding_model = NomicEmbeddings()
+    small_db = await build_faiss_concurrent(small_chunks, embedding_model, batch_size=64, max_concurrent=3)
+    retriever = small_db.as_retriever(search_kwargs={"k": 10})
+
+    # Targeted exclusion queries
+    queries = [
+        "exclusions not covered rejected claim limitation",
+        "waiting period pre-existing disease sub-limit cap",
+        "co-payment excess room rent ICU non-payable",
+    ]
+    seen, unique_content = set(), []
+    for q in queries:
+        for doc in await asyncio.to_thread(retriever.invoke, q):
+            if doc.page_content not in seen:
+                unique_content.append(doc.page_content)
+                seen.add(doc.page_content)
+
+    context = "\n".join(unique_content)[:4500]
+
     chain = EXCLUSIONS_PROMPT | llm_json
     response = await chain.ainvoke({"context": context})
-    
-    return json.loads(response.content if hasattr(response, "content") else response)
+    raw = json.loads(response.content if hasattr(response, "content") else response)
+
+    # --- Backend normalization ---
+    VALID_RATINGS = {"high", "medium", "low"}
+    RATING_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+    normalized = []
+    for item in (raw if isinstance(raw, list) else []):
+        feature = str(item.get("feature", "")).strip()
+        description = str(item.get("description", "")).strip()
+        rating = str(item.get("trap_rating", "")).lower().strip()
+
+        if not feature or not description:
+            continue  # skip malformed items
+
+        # Normalize rating: default to "medium" if unrecognized
+        if rating not in VALID_RATINGS:
+            rating = "medium"
+
+        normalized.append({
+            "feature": feature,
+            "description": description,
+            "trap_rating": rating,
+        })
+
+    # Sort: high → medium → low
+    normalized.sort(key=lambda x: RATING_ORDER.get(x["trap_rating"], 99))
+
+    return normalized
 
 
 @app.post("/explain_snippet")
@@ -569,6 +659,21 @@ async def proxy_pdf(url: str):
 # ---------------------- Agent Nodes & LangGraph ---------------------- #
 
 async def information_gatherer_node(state: AgentState) -> AgentState:
+    # --- Live RAG: query attached document with user's question ---
+    doc_context = ""
+    doc_url = state.get("documents")
+    user_q = state.get("user_input", "")
+    if doc_url and user_q:
+        try:
+            doc_db = await get_or_build_faiss(doc_url, state.get("auth_token"))
+            retriever = doc_db.as_retriever(search_kwargs={"k": 4})
+            doc_results = await asyncio.to_thread(retriever.invoke, user_q)
+            if doc_results:
+                doc_context = "\n".join(d.page_content for d in doc_results)[:2000]
+                logger.info(f"RAG doc context retrieved: {len(doc_context)} chars")
+        except Exception as e:
+            logger.warning(f"RAG doc query failed: {e}")
+
     chain = INTAKE_AGENT_PROMPT | llm_json
     response = await chain.ainvoke({
         "chat_history": "\n".join(state.get("chat_history", [])),
@@ -578,7 +683,9 @@ async def information_gatherer_node(state: AgentState) -> AgentState:
         "pre_existing_conditions": state.get("pre_existing_conditions") or "",
         "budget": state.get("budget") or "",
         "location": state.get("location") or "",
-        "goal": state.get("goal") or ""
+        "goal": state.get("goal") or "",
+        "current_recommendation": state.get("final_recommendation", "None yet."),
+        "doc_context": doc_context,
     })
 
     try:
@@ -587,63 +694,83 @@ async def information_gatherer_node(state: AgentState) -> AgentState:
         logger.error(f"Failed to parse JSON from information_gatherer: {e}")
         data = {}
 
-    if "age" in data and data["age"]: state["age"] = data["age"]
-    if "family_size" in data and data["family_size"]: state["family_size"] = data["family_size"]
-    if "pre_existing_conditions" in data and data["pre_existing_conditions"]: state["pre_existing_conditions"] = data[
-        "pre_existing_conditions"]
-    if "budget" in data and data["budget"]: state["budget"] = data["budget"]
-    if "location" in data and data["location"]: state["location"] = data["location"]
-    if "goal" in data and data["goal"]: state["goal"] = data["goal"]
+    # Change detection
+    fields = ["age", "family_size", "pre_existing_conditions", "budget", "location", "goal"]
+    any_change = False
+    for f in fields:
+        new_val = data.get(f)
+        if new_val and new_val != state.get(f):
+            state[f] = new_val
+            any_change = True
+            
+    if any_change:
+        logger.info(f"Profile change detected. Resetting recommendation flags.")
+        state["recommendation_generated"] = False
+        state["final_recommendation"] = ""
+        state["market_context"] = []
+        state["refined_links"] = []
 
     if "next_question" in data:
         state["next_question"] = data["next_question"]
 
     state["intake_complete"] = data.get("intake_complete", False)
-    state["market_context"] = state.get("market_context", [])
-    state["search_queries"] = state.get("search_queries", [])
-
     return state
 
 
-async def market_search_node(state: AgentState) -> AgentState:
-    """Generates search queries and fetches real-time market data."""
-    # 1. Generate Query strings (use regular llm, NOT llm_json — Groq rejects arrays in json_object mode)
-    chain = SEARCH_QUERY_PROMPT | llm
-    try:
-        response = await chain.ainvoke({
-            "age": state.get("age") or "unknown",
-            "family_size": state.get("family_size") or "unknown",
-            "location": state.get("location") or "unknown",
-            "goal": state.get("goal") or "unknown"
-        })
-
-        raw = response.content if hasattr(response, "content") else response
-        # Strip any markdown code fences the LLM might add
-        clean = raw.strip()
-        if clean.startswith("```"):
-            clean = "\n".join(clean.split("\n")[1:])
-        if clean.endswith("```"):
-            clean = "\n".join(clean.split("\n")[:-1])
-        clean = clean.strip()
-
-        parsed = json.loads(clean)
-        # Handle both {"queries": [...]} and raw [...] formats
-        if isinstance(parsed, dict) and "queries" in parsed:
-            queries = parsed["queries"]
-        elif isinstance(parsed, list):
-            queries = parsed
-        else:
-            queries = list(parsed.values())[0] if parsed else []
-        state["search_queries"] = [q for q in queries if isinstance(q, str)][:5]
-    except Exception as e:
-        logger.error(f"Failed to generate/parse search queries: {e}")
-        # Fallback: generate a basic query from profile
-        fallback = f"{state.get('goal', 'insurance')} for {state.get('age', '')} year old in {state.get('location', 'India')} {state.get('family_size', '')}"
-        state["search_queries"] = [fallback.strip()]
-
-    # 2. Execute Search
-    market_findings = []
+async def robust_web_search(query: str, search_depth: str = "basic") -> List[str]:
+    """
+    Tries SerpApi if key is present, else falls back to DuckDuckGo/LiteSearch.
+    Returns a list of snippet strings.
+    """
+    findings = []
     
+    # 1. Try SerpApi (Premium)
+    if SERP_API_KEY:
+        try:
+            logger.info(f"Using SerpApi for query: {query}")
+            params = {
+                "q": query,
+                "api_key": SERP_API_KEY,
+                "engine": "google",
+                "num": 5
+            }
+            # Run in thread to avoid blocking
+            search = await asyncio.to_thread(GoogleSearch, params)
+            resultsBody = search.get_dict()
+            
+            # Knowledge Graph (High Quality)
+            if "knowledge_graph" in resultsBody:
+                kg = resultsBody["knowledge_graph"]
+                kg_text = f"Source: {kg.get('source', {}).get('link', 'knowledge_graph')}\nTitle: Knowledge Graph\nSnippet: {kg.get('description', 'Insurance info')}"
+                findings.append(kg_text)
+            
+            # Organic Results
+            organic = resultsBody.get("organic_results", [])
+            for r in organic[:3]:
+                snippet = f"Source: {r.get('link')}\nTitle: {r.get('title')}\nSnippet: {r.get('snippet')}"
+                
+                # Handle Deep Crawl
+                if search_depth == "deep":
+                    try:
+                        async with httpx.AsyncClient(timeout=8.0) as client:
+                            resp = await client.get(r.get('link'), follow_redirects=True)
+                            if resp.status_code == 200:
+                                from bs4 import BeautifulSoup
+                                soup = BeautifulSoup(resp.text, "html.parser")
+                                text = soup.get_text(separator="\n")
+                                clean_text = "\n".join(line.strip() for line in text.splitlines() if line.strip())[:2500]
+                                snippet += f"\nDeep Content: {clean_text}"
+                    except Exception as crawl_err:
+                        logger.warning(f"Failed deep crawl for {r.get('link')}: {crawl_err}")
+                
+                findings.append(snippet)
+            
+            if findings:
+                return findings
+        except Exception as e:
+            logger.error(f"SerpApi failed: {e}. Falling back to DuckDuckGo.")
+
+    # 2. Fallback to DuckDuckGo/LiteSearch
     async def fallback_search(q: str):
         url = "https://lite.duckduckgo.com/lite/"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -661,41 +788,80 @@ async def market_search_node(state: AgentState) -> AgentState:
             pass
         return []
 
-    for query in state["search_queries"]:
-        try:
-            # Attempt DDGS first
-            results = []
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=3))
-            
-            # If DDGS failed to return results (rate limited), use robust fallback
-            if not results:
-                results = await fallback_search(query)
-
-            for r in results:
-                snippet = f"Source: {r['href']}\nTitle: {r['title']}\nSnippet: {r['body']}"
-                
-                if state.get("search_depth") == "deep" and r['href'] != "lite_search":
-                    # Attempt to crawl and ingest the actual page
-                    try:
-                        async with httpx.AsyncClient(timeout=8.0) as client:
-                            resp = await client.get(r['href'], follow_redirects=True)
-                            if resp.status_code == 200:
-                                from bs4 import BeautifulSoup
-                                soup = BeautifulSoup(resp.text, "html.parser")
-                                text = soup.get_text(separator="\n")
-                                clean_text = "\n".join(line.strip() for line in text.splitlines() if line.strip())[:2500]
-                                snippet += f"\nDeep Content: {clean_text}"
-                    except Exception as crawl_err:
-                        logger.warning(f"Failed deep crawl for {r['href']}: {crawl_err}")
-
-                market_findings.append(snippet)
-        except Exception as search_err:
-            logger.error(f"Search failed for query '{query}': {search_err}")
-            # Ensure we try fallback even if DDGS throws an exception
+    try:
+        results = []
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=3))
+        
+        if not results:
             results = await fallback_search(query)
-            for r in results:
-                market_findings.append(f"Source: {r['href']}\nTitle: {r['title']}\nSnippet: {r['body']}")
+
+        for r in results:
+            snippet = f"Source: {r['href']}\nTitle: {r['title']}\nSnippet: {r['body']}"
+            if search_depth == "deep" and r['href'] != "lite_search":
+                try:
+                    async with httpx.AsyncClient(timeout=8.0) as client:
+                        resp = await client.get(r['href'], follow_redirects=True)
+                        if resp.status_code == 200:
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(resp.text, "html.parser")
+                            text = soup.get_text(separator="\n")
+                            clean_text = "\n".join(line.strip() for line in text.splitlines() if line.strip())[:2500]
+                            snippet += f"\nDeep Content: {clean_text}"
+                except Exception:
+                    pass
+            findings.append(snippet)
+    except Exception as e:
+        logger.error(f"DuckDuckGo failed for {query}: {e}")
+        # One last try with lite search if DDGS crashed
+        results = await fallback_search(query)
+        for r in results:
+            findings.append(f"Source: {r['href']}\nTitle: {r['title']}\nSnippet: {r['body']}")
+
+    return findings
+
+
+async def market_search_node(state: AgentState) -> AgentState:
+    """Generates search queries and fetches real-time market data."""
+    # 1. Generate Query strings
+    chain = SEARCH_QUERY_PROMPT | llm
+    try:
+        response = await chain.ainvoke({
+            "age": state.get("age") or "unknown",
+            "family_size": state.get("family_size") or "unknown",
+            "location": state.get("location") or "unknown",
+            "goal": state.get("goal") or "unknown"
+        })
+
+        raw = response.content if hasattr(response, "content") else response
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = "\n".join(clean.split("\n")[1:])
+        if clean.endswith("```"):
+            clean = "\n".join(clean.split("\n")[:-1])
+        clean = clean.strip()
+
+        parsed = json.loads(clean)
+        if isinstance(parsed, dict) and "queries" in parsed:
+            queries = parsed["queries"]
+        elif isinstance(parsed, list):
+            queries = parsed
+        else:
+            queries = list(parsed.values())[0] if parsed else []
+        state["search_queries"] = [q for q in queries if isinstance(q, str)][:5]
+    except Exception as e:
+        logger.error(f"Failed to generate/parse search queries: {e}")
+        fallback = f"{state.get('goal', 'insurance')} for {state.get('age', '')} year old in {state.get('location', 'India')} {state.get('family_size', '')}"
+        state["search_queries"] = [fallback.strip()]
+
+    # 2. Execute Search using robust helper
+    market_findings = []
+    depth = state.get("search_depth", "basic")
+    
+    # Process queries sequentially to avoid aggressive rate limits on fallbacks
+    for query in state["search_queries"]:
+        results = await robust_web_search(query, depth)
+        market_findings.extend(results)
 
     state["market_context"] = market_findings
     return state
@@ -779,12 +945,18 @@ async def recommendation_node(state: AgentState) -> AgentState:
     })
 
     state["final_recommendation"] = clean_output(response)
+    state["recommendation_generated"] = True
     return state
 
 
 def should_continue(state: AgentState):
+    # If recommendation already exists and we have a conversational response for the chat, we stop.
+    if state.get("recommendation_generated") and state.get("next_question"):
+        return END
+
     if state.get("intake_complete"):
-        return "market_search_node"  # Always prioritize market search
+        # If intake is complete, but we haven't generated a recommendation yet (or we're re-triggering), proceed.
+        return "market_search_node"
     else:
         return END
 
@@ -840,13 +1012,14 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
         "search_depth": req.search_depth or prev.get("search_depth", "basic"),
         "documents": pick("documents"),
         "auth_token": Authorization,
-        "intake_complete": False,
+        "intake_complete": prev.get("intake_complete", False),
         "retrieved_policies": [],
-        "market_context": [],
+        "market_context": prev.get("market_context", []),
         "search_queries": [],
-        "final_recommendation": "",
+        "final_recommendation": prev.get("final_recommendation", ""),
         "next_question": "",
-        "refined_links": []
+        "refined_links": prev.get("refined_links", []),
+        "recommendation_generated": prev.get("recommendation_generated", False)
     }
 
     try:
@@ -864,6 +1037,10 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
             "documents": final_state.get("documents"),
             "chat_history": final_state.get("chat_history", []),
             "next_question": final_state.get("next_question", ""),
+            "recommendation_generated": final_state.get("recommendation_generated", False),
+            "final_recommendation": final_state.get("final_recommendation", ""),
+            "market_context": final_state.get("market_context", []),
+            "refined_links": final_state.get("refined_links", []),
         }
 
         # ---- Build frontend-friendly response ----
@@ -875,6 +1052,7 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
             "intake_complete": final_state.get("intake_complete", False),
             "final_recommendation": final_state.get("final_recommendation", ""),
             "market_context": final_state.get("market_context", []),
+            "refined_links": final_state.get("refined_links", []),
             "extracted_profile": extracted_profile,
         }
     except Exception as e:

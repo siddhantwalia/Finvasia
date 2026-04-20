@@ -120,16 +120,14 @@ export interface ScenarioResponse {
   relevant_clause: string;
 }
 
-export interface VisualValue {
-  formatted: string;
-  raw: number;
+export interface PolicyBenefit {
+  label: string;
+  value: string;
+  raw?: number;
 }
 
 export interface VisualSummary {
-  deductible: { individual: VisualValue; family: VisualValue };
-  max_out_of_pocket: VisualValue;
-  copay: { pcp: string; specialist: string; er: string };
-  coinsurance: string;
+  benefits: PolicyBenefit[];
   waiting_periods: Array<{ condition: string; period: string }>;
   highlights: string[];
 }

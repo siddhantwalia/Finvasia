@@ -2,17 +2,21 @@ import { useState } from "react";
 import { Shell } from "@/components/layout/Shell";
 import { PageHeader } from "@/components/PageHeader";
 import { PolicyUrlInput } from "@/components/PolicyUrlInput";
-import { CoverageOrb } from "@/components/three/CoverageOrb";
 import { api, VisualSummary } from "@/lib/api";
 import { toast } from "sonner";
 import { motion } from "framer-motion";
 
-const Stat = ({ label, value, sub }: { label: string; value: string; sub?: string }) => (
-  <div className="quant-card p-5">
-    <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">{label}</div>
-    <div className="font-display text-3xl mt-2">{value}</div>
-    {sub && <div className="font-mono text-xs text-muted-foreground mt-1">{sub}</div>}
-  </div>
+const BenefitCard = ({ label, value }: { label: string; value: string }) => (
+  <motion.div
+    initial={{ opacity: 0, y: 8 }}
+    animate={{ opacity: 1, y: 0 }}
+    className="quant-card p-5 flex flex-col gap-2"
+  >
+    <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground leading-tight">
+      {label}
+    </div>
+    <div className="font-display text-2xl break-words leading-snug">{value}</div>
+  </motion.div>
 );
 
 const Bar = ({ pct, label, value }: { pct: number; label: string; value: string }) => (
@@ -44,80 +48,61 @@ const Summary = () => {
     finally { setLoading(false); }
   };
 
-  // derive a 0-1 coverage score for the orb
-  const score = data
-    ? Math.max(0.15, Math.min(0.95, 1 - Math.min(1, (data.deductible?.individual?.raw ?? 0) / 5000) * 0.4 - Math.min(1, (data.max_out_of_pocket?.raw ?? 0) / 15000) * 0.3))
-    : 0.6;
-
   return (
     <Shell>
       <PageHeader
         index="02"
         kicker="POST /get_visual_summary"
         title="Your policy. Now legible."
-        blurb="Structured fields extracted from the document — gauges instead of paragraphs, numbers instead of footnotes."
+        blurb="Every benefit and limit extracted directly from the document — in the policy's own words, not generic labels."
       />
 
       <div className="container py-10 grid gap-6">
         <PolicyUrlInput onSubmit={run} loading={loading} cta="extract" />
 
-        <div className="grid lg:grid-cols-[1fr_1.4fr] gap-6">
-          {/* 3D + score */}
-          <div className="quant-card relative aspect-square min-h-[360px] overflow-hidden">
-            <div className="absolute top-3 left-3 z-10 font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
-              ./coverage_orb · score {(score * 100).toFixed(0)}
-            </div>
-            <CoverageOrb score={score} />
-            <div className="absolute bottom-4 left-4 right-4 z-10">
-              <div className="font-display text-4xl">{(score * 100).toFixed(0)}<span className="text-muted-foreground text-2xl">/100</span></div>
-              <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground mt-1">composite coverage index</div>
+        {/* Benefits Grid */}
+        {(data?.benefits?.length ?? 0) > 0 ? (
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {data!.benefits.map((b, i) => (
+              <BenefitCard key={i} label={b.label} value={b.value} />
+            ))}
+          </div>
+        ) : (
+          <div className="quant-card p-8 text-center">
+            <div className="font-mono text-xs text-muted-foreground">
+              {loading ? "extracting policy data…" : "paste a policy URL above to extract coverage details."}
             </div>
           </div>
+        )}
 
-          {/* Numbers */}
-          <div className="grid sm:grid-cols-2 gap-4 content-start">
-            <Stat label="deductible · individual" value={data?.deductible.individual.formatted ?? "—"} />
-            <Stat label="deductible · family" value={data?.deductible.family.formatted ?? "—"} />
-            <Stat label="max out-of-pocket" value={data?.max_out_of_pocket.formatted ?? "—"} />
-            <Stat label="coinsurance" value={data?.coinsurance ?? "—"} />
-            <Stat label="copay · pcp" value={data?.copay.pcp ?? "—"} />
-            <Stat label="copay · specialist" value={data?.copay.specialist ?? "—"} sub={data ? `er · ${data.copay.er}` : undefined} />
-          </div>
-        </div>
-
-        {/* waiting periods */}
-        <div className="quant-card p-6">
-          <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground mb-4">// waiting_periods</div>
-          {data?.waiting_periods?.length ? (
+        {/* Waiting periods */}
+        {(data?.waiting_periods?.length ?? 0) > 0 && (
+          <div className="quant-card p-6">
+            <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground mb-4">// waiting_periods</div>
             <div className="grid gap-4">
-              {data.waiting_periods.map((w, i) => {
-                // crude: parse months from "24 months"
+              {data!.waiting_periods.map((w, i) => {
                 const m = parseInt(w.period.match(/\d+/)?.[0] ?? "0", 10);
                 const pct = Math.min(1, m / 48);
                 return <Bar key={i} label={w.condition} value={w.period} pct={pct} />;
               })}
             </div>
-          ) : (
-            <div className="font-mono text-xs text-muted-foreground">{loading ? "fetching…" : "run an extraction to populate."}</div>
-          )}
-        </div>
+          </div>
+        )}
 
-        {/* highlights */}
-        <div className="quant-card p-6">
-          <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground mb-4">// highlights</div>
-          {data?.highlights?.length ? (
+        {/* Highlights */}
+        {(data?.highlights?.length ?? 0) > 0 && (
+          <div className="quant-card p-6">
+            <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground mb-4">// highlights</div>
             <ul className="grid sm:grid-cols-2 gap-3">
-              {data.highlights.map((h, i) => (
+              {data!.highlights.map((h, i) => (
                 <li key={i} className="flex gap-3 text-sm">
                   <span className="text-primary font-mono mt-0.5">▸</span>
                   <span>{h}</span>
                 </li>
               ))}
             </ul>
-          ) : (
-            <div className="font-mono text-xs text-muted-foreground">no highlights yet.</div>
-          )}
-        </div>
+          </div>
+        )}
 
         {url && <div className="font-mono text-[11px] text-muted-foreground">source · {url}</div>}
       </div>
