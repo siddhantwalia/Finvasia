@@ -46,7 +46,7 @@ const Summary = () => {
 
   // derive a 0-1 coverage score for the orb
   const score = data
-    ? Math.max(0.15, Math.min(0.95, 1 - Math.min(1, (data.deductible?.individual ?? 0) / 5000) * 0.4 - Math.min(1, (data.max_out_of_pocket ?? 0) / 15000) * 0.3))
+    ? Math.max(0.15, Math.min(0.95, 1 - Math.min(1, (data.deductible?.individual?.raw ?? 0) / 5000) * 0.4 - Math.min(1, (data.max_out_of_pocket?.raw ?? 0) / 15000) * 0.3))
     : 0.6;
 
   return (
@@ -76,9 +76,9 @@ const Summary = () => {
 
           {/* Numbers */}
           <div className="grid sm:grid-cols-2 gap-4 content-start">
-            <Stat label="deductible · individual" value={data ? `$${data.deductible.individual.toLocaleString()}` : "—"} />
-            <Stat label="deductible · family" value={data ? `$${data.deductible.family.toLocaleString()}` : "—"} />
-            <Stat label="max out-of-pocket" value={data ? `$${data.max_out_of_pocket.toLocaleString()}` : "—"} />
+            <Stat label="deductible · individual" value={data?.deductible.individual.formatted ?? "—"} />
+            <Stat label="deductible · family" value={data?.deductible.family.formatted ?? "—"} />
+            <Stat label="max out-of-pocket" value={data?.max_out_of_pocket.formatted ?? "—"} />
             <Stat label="coinsurance" value={data?.coinsurance ?? "—"} />
             <Stat label="copay · pcp" value={data?.copay.pcp ?? "—"} />
             <Stat label="copay · specialist" value={data?.copay.specialist ?? "—"} sub={data ? `er · ${data.copay.er}` : undefined} />

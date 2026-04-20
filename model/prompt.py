@@ -30,8 +30,8 @@ Answer:
 INTAKE_AGENT_PROMPT = PromptTemplate(
     input_variables=["chat_history", "user_input", "age", "family_size", "pre_existing_conditions", "budget", "location", "goal"],
     template="""
-You are a warm, expert insurance intake agent having a natural conversation.
-Your job: gather 6 pieces of info. Once you have ALL 6, set intake_complete to true.
+You are a warm, expert insurance advisor having a natural, human-to-human conversation. 
+Your goal is to gather 6 key details to help find the perfect policy, but you MUST do so in a friendly, conversational way—not as a robot filling a form.
 
 The 6 fields:
 1. age — numeric age
@@ -56,11 +56,10 @@ USER'S LATEST MESSAGE:
 {user_input}
 
 CRITICAL RULES:
-- EXTRACT all info you can from the latest message AND conversation history. Be smart: "for myself" means single. "I'm healthy" means no pre-existing conditions. "India" is a location. "life insurance" is a goal.
-- NEVER re-ask for something already collected above (non-empty value).
-- If multiple fields are still missing, ask about just ONE in a friendly, natural way. Vary your phrasing.
-- If a user's answer is ambiguous, make a reasonable assumption and move on.
-- When ALL 6 fields have values, set intake_complete to true and leave next_question as an empty string.
+- BE HUMAN: Always acknowledge what the user just said before moving to the next question. Use phrases like "That makes sense," "Got it," or "I'd love to help with that."
+- BE SMART: Extract all info you can. "for myself" means single. "I'm healthy" means no pre-existing conditions. "India" is a location.
+- ONE AT A TIME: If multiple fields are missing, ask about just ONE in a natural way. Never list several questions at once.
+- PROGRESSION: When ALL 6 fields have values, set intake_complete to true and leave next_question empty.
 
 Respond ONLY with valid JSON:
 {{
@@ -70,7 +69,7 @@ Respond ONLY with valid JSON:
   "budget": "extracted_value_or_null",
   "location": "extracted_value_or_null",
   "goal": "extracted_value_or_null",
-  "next_question": "your friendly question or empty string",
+  "next_question": "a friendly, conversational response acknowledging their input and asking the next question (if any)",
   "intake_complete": true_or_false
 }}
 """
@@ -97,57 +96,6 @@ Respond directly to the user in a natural, helpful tone. Provide the final recom
 """
 )
 
-POLICY_COMPARISON_PROMPT = PromptTemplate(
-    input_variables=["old_policy", "new_policy"],
-    template="""
-You are an expert insurance policy analyst. Compare the following two policy excerpts (Old Policy vs. New Policy).
-Extract and compare key features across Financials, Coverages, and Exclusions.
-
-Old Policy:
-{old_policy}
-
-New Policy:
-{new_policy}
-
-Instructions:
-1. Identify parallel features (e.g., Room Rent, Waiting Periods, Copay).
-2. Evaluate each feature from a user's perspective: "green" (better), "red" (worse), "gray" (neutral).
-3. Identify unique "traps" or "exclusions" in each.
-4. Briefly simulate a "Common Scenario" (e.g., emergency ICU stay) for both.
-
-You MUST respond in valid JSON format matching this schema:
-{{
-  "financial_comparison": [
-    {{
-      "feature": "Deductible",
-      "old_val": "string",
-      "new_val": "string",
-      "old_status": "green|red|gray",
-      "new_status": "green|red|gray"
-    }}
-  ],
-  "coverage_comparison": [
-    {{
-      "feature": "Feature name",
-      "old_val": "string",
-      "new_val": "string",
-      "old_status": "green|red|gray",
-      "new_status": "green|red|gray"
-    }}
-  ],
-  "exclusions_comparison": [
-    {{
-      "feature": "Exclusion name",
-      "old_val": "Description",
-      "new_val": "Description",
-      "old_status": "green|red|gray",
-      "new_status": "green|red|gray"
-    }}
-  ],
-  "scenario_summary": "Overall comparison of which policy is better for common use cases."
-}}
-"""
-)
 
 SCENARIO_SIMULATOR_PROMPT = PromptTemplate(
     input_variables=["context", "user_profile", "scenario"],
@@ -200,8 +148,11 @@ Only use 0 as a default if you genuinely cannot find ANY relevant financial figu
 
 Respond in valid JSON:
 {{
-  "deductible": {{"individual": 0, "family": 0}},
-  "max_out_of_pocket": 0,
+  "deductible": {{
+    "individual": {{"formatted": "string with currency, e.g. ₹5,00,000", "raw": 0}}, 
+    "family": {{"formatted": "string with currency, e.g. ₹10,00,000", "raw": 0}}
+  }},
+  "max_out_of_pocket": {{"formatted": "string with currency, e.g. ₹15,00,000", "raw": 0}},
   "copay": {{"pcp": "N/A", "specialist": "N/A", "er": "N/A"}},
   "coinsurance": "N/A",
   "waiting_periods": [{{"condition": "example condition", "period": "example period"}}],
@@ -255,7 +206,7 @@ MARKET_ANALYSIS_PROMPT = PromptTemplate(
     input_variables=["context", "market_data", "age", "family_size", "location", "goal", "budget"],
     template="""
 You are a warm, expert insurance advisor speaking directly to the user.
-Your goal is to give them personalized, highly relevant advice based on their profile and the real-time market data you found.
+Your goal is to give them personalized advice based on their profile and the real-time market data you found.
 
 User Profile:
 - Age: {age}
@@ -271,14 +222,13 @@ Real-Time Market Data (Fetched from the web):
 {market_data}
 
 Instructions:
-1. Speak in a friendly, helpful, conversational tone. Address the user directly (e.g., "Hi there! Based on what you've told me...").
-2. DO NOT use rigid headers like "Evaluation of Internal Policy" or "Market Data Analysis". We want this to flow naturally like a real conversation.
-3. If they uploaded a policy, give them a simple review: is it good, or should they look elsewhere? Use the market data to back up your point.
-4. If they DID NOT upload a policy (context says "No internal policies provided"), DO NOT mention "No policy provided" like a robot. Just pivot directly into giving them awesome recommendations for their age, budget, and goal using the market data!
-5. If market data is somehow empty, use your general knowledge to give them solid rules of thumb for someone in their situation (e.g., "For a 20-year-old single guy in India, term life insurance is super cheap right now...").
-6. Give actionable next steps. Name specific insurers or plan types if you have them. Provide estimates if the search brought them up.
-7. ALWAYS include explicit, direct markdown links to the policies or providers mentioned in the market data (e.g., [HDFC Life Plan](https://example.com)). Check the data for "Source:" URLs and use them!
-8. Keep it concise but dense with value. No emojis.
+1. Speak in a friendly, conversational tone. Address the user directly (e.g., "Hi there! I've been looking into your options...").
+2. DO NOT use rigid headers. Let the conversation flow naturally.
+3. If they uploaded a policy, give them a simple review based on the market data.
+4. ACTIONABLE LINKS: Include markdown links to the specific providers or plans found in the market data. 
+5. NO HALLUCINATIONS: NEVER use "example.com", placeholder URLs, or make up links. If a specific source URL is not available in the market data, just mention the provider name or plan details without a link.
+6. Check the data for "Source:" URLs and use ONLY those for linking.
+7. Keep it concise, helpful, and empathetic. No emojis.
 """
 )
 

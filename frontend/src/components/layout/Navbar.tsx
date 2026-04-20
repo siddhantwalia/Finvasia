@@ -6,7 +6,6 @@ import { useState } from "react";
 const links = [
   { to: "/intake", label: "Intake" },
   { to: "/summary", label: "Summary" },
-  { to: "/compare", label: "Compare" },
   { to: "/simulate", label: "Simulate" },
   { to: "/exclusions", label: "Traps" },
   { to: "/explainer", label: "Explainer" },

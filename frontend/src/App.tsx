@@ -7,7 +7,6 @@ import { ThemeProvider } from "@/components/ThemeProvider";
 import Index from "./pages/Index.tsx";
 import Intake from "./pages/Intake.tsx";
 import Summary from "./pages/Summary.tsx";
-import Compare from "./pages/Compare.tsx";
 import Simulate from "./pages/Simulate.tsx";
 import Exclusions from "./pages/Exclusions.tsx";
 import QA from "./pages/QA.tsx";
@@ -28,7 +27,6 @@ const App = () => (
             <Route path="/" element={<Index />} />
             <Route path="/intake" element={<Intake />} />
             <Route path="/summary" element={<Summary />} />
-            <Route path="/compare" element={<Compare />} />
             <Route path="/simulate" element={<Simulate />} />
             <Route path="/exclusions" element={<Exclusions />} />
             <Route path="/qa" element={<QA />} />

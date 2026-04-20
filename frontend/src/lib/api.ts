@@ -110,20 +110,6 @@ export interface IntakeResponse {
 
 export type StatusColor = "green" | "red" | "yellow" | "gray";
 
-export interface ComparisonRow {
-  feature: string;
-  old_val: string;
-  new_val: string;
-  old_status: StatusColor;
-  new_status: StatusColor;
-}
-
-export interface CompareResponse {
-  financial_comparison: ComparisonRow[];
-  coverage_comparison: ComparisonRow[];
-  exclusions_comparison: ComparisonRow[];
-  scenario_summary: string;
-}
 
 export interface ScenarioResponse {
   is_covered: boolean;
@@ -133,9 +119,14 @@ export interface ScenarioResponse {
   relevant_clause: string;
 }
 
+export interface VisualValue {
+  formatted: string;
+  raw: number;
+}
+
 export interface VisualSummary {
-  deductible: { individual: number; family: number };
-  max_out_of_pocket: number;
+  deductible: { individual: VisualValue; family: VisualValue };
+  max_out_of_pocket: VisualValue;
   copay: { pcp: string; specialist: string; er: string };
   coinsurance: string;
   waiting_periods: Array<{ condition: string; period: string }>;
@@ -157,14 +148,25 @@ export interface HackrxResponse {
 
 export const api = {
   intake: (b: IntakeRequest, s?: AbortSignal) => post<IntakeResponse>("/chat/intake", b, s),
-  compare: (b: { old_policy: string; new_policy: string }, s?: AbortSignal) =>
-    post<CompareResponse>("/compare_policies", b, s),
   simulate: (b: { policy_url: string; scenario: string; user_profile?: Record<string, unknown> }, s?: AbortSignal) =>
     post<ScenarioResponse>("/simulate_scenario", b, s),
   visualSummary: (b: { policy_url: string }, s?: AbortSignal) =>
     post<VisualSummary>("/get_visual_summary", b, s),
   exclusions: (b: { policy_url: string }, s?: AbortSignal) =>
     post<ExclusionItem[]>("/get_exclusions", b, s),
+  uploadPolicy: async (file: File): Promise<{ url: string }> => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch(`${getApiBase()}/upload_policy`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`${res.status} ${res.statusText}${text ? ` — ${text}` : ""}`);
+    }
+    return res.json();
+  },
   hackrx: (b: { documents: string; questions: string[] }, s?: AbortSignal) =>
     post<HackrxResponse>("/hackrx/run", b, s),
   explainSnippet: (b: { snippet: string }, onChunk: (chunk: string) => void, s?: AbortSignal) =>

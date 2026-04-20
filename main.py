@@ -5,7 +5,10 @@ import httpx
 import time
 import json
 from collections import OrderedDict
-from fastapi import FastAPI, Header, HTTPException
+import os
+import uuid
+from fastapi import FastAPI, Header, HTTPException, File, UploadFile
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from typing import List, Dict, TypedDict, Optional, Annotated
@@ -19,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from model import (
     Prompt, llm, NomicEmbeddings, rewrite_llm, llm_json,
     INTAKE_AGENT_PROMPT, RECOMMENDATION_AGENT_PROMPT,
-    POLICY_COMPARISON_PROMPT, SCENARIO_SIMULATOR_PROMPT,
+    SCENARIO_SIMULATOR_PROMPT,
     VISUAL_SUMMARY_PROMPT, EXCLUSIONS_PROMPT,
     SEARCH_QUERY_PROMPT, MARKET_ANALYSIS_PROMPT, EXPLAINER_PROMPT
 )
@@ -52,6 +55,13 @@ faiss_cache: Dict[str, FAISS] = OrderedDict()  # doc_key -> faiss_db (simplified
 embedding_cache: Dict[int, List[float]] = OrderedDict()  # hash(text) -> embedding (to avoid re-embedding duplicates)
 session_store: Dict[str, dict] = {}  # session_id -> accumulated agent state
 
+# --- File Upload Setup ---
+UPLOAD_DIR = "uploads"
+if not os.path.exists(UPLOAD_DIR):
+    os.makedirs(UPLOAD_DIR)
+
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
 # Add CORS Middleware
 app.add_middleware(
     CORSMiddleware,
@@ -67,9 +77,6 @@ class QueryRequest(BaseModel):
     questions: List[str]
 
 
-class ComparisonRequest(BaseModel):
-    old_policy: str  # URL or text
-    new_policy: str  # URL or text
 
 
 class ScenarioRequest(BaseModel):
@@ -440,23 +447,6 @@ async def run_query(req: QueryRequest, Authorization: str = Header(default=None)
     return {"answers": answers}
 
 
-@app.post("/compare_policies")
-async def compare_policies(req: ComparisonRequest, Authorization: str = Header(default=None)):
-    """Deep comparison of two policies across benefits, exclusions, and scenarios."""
-    async def get_text(source: str):
-        if source.startswith("http"):
-            db = await get_or_build_faiss(source, Authorization)
-            # Retrieve broad context for comparison (using a general query)
-            docs = await asyncio.to_thread(db.as_retriever(search_kwargs={"k": 10}).invoke, "summary of coverage, exclusions, and benefits")
-            return "\n".join([d.page_content for d in docs])
-        return source
-
-    old_text, new_text = await asyncio.gather(get_text(req.old_policy), get_text(req.new_policy))
-
-    chain = POLICY_COMPARISON_PROMPT | llm_json
-    response = await chain.ainvoke({"old_policy": old_text[:10000], "new_policy": new_text[:10000]})
-    
-    return json.loads(response.content if hasattr(response, "content") else response)
 
 
 @app.post("/simulate_scenario")
@@ -533,6 +523,32 @@ async def explain_snippet(req: ExplainerRequest):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate_stream(), media_type="text/event-stream")
+
+
+@app.post("/upload_policy")
+async def upload_policy(file: UploadFile = File(...)):
+    """Upload a policy file and return its local static URL."""
+    # Validate extension
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in [".pdf", ".docx", ".png", ".jpg", ".jpeg"]:
+        raise HTTPException(status_code=400, detail="Unsupported file type.")
+
+    # 50MB limit check (FastAPI doesn't do this by default, we'll check it during read)
+    file_content = await file.read()
+    if len(file_content) > 50 * 1024 * 1024:  # 50MB
+        raise HTTPException(status_code=413, detail="File too large. Max 50MB.")
+
+    # Generate unique filename
+    unique_filename = f"{uuid.uuid4()}{ext}"
+    file_path = os.path.join(UPLOAD_DIR, unique_filename)
+
+    with open(file_path, "wb") as f:
+        f.write(file_content)
+
+    # Return local static URL
+    # In a real app, you'd use the base URL from the request, but for now we'll assume localhost:8000
+    # or handle it on the frontend by prepending the base URL.
+    return {"url": f"/uploads/{unique_filename}"}
 
 
 @app.get("/proxy_pdf")
