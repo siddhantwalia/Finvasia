@@ -24,7 +24,8 @@ from model import (
     INTAKE_AGENT_PROMPT, RECOMMENDATION_AGENT_PROMPT,
     SCENARIO_SIMULATOR_PROMPT,
     VISUAL_SUMMARY_PROMPT, EXCLUSIONS_PROMPT,
-    SEARCH_QUERY_PROMPT, MARKET_ANALYSIS_PROMPT, EXPLAINER_PROMPT
+    SEARCH_QUERY_PROMPT, MARKET_ANALYSIS_PROMPT, EXPLAINER_PROMPT,
+    MARKET_REFINE_PROMPT
 )
 from duckduckgo_search import DDGS
 from utils import parse_document_from_url, split_documents
@@ -128,6 +129,7 @@ class AgentState(TypedDict):
     documents: Optional[str]
     next_question: Optional[str]
     auth_token: Optional[str]
+    refined_links: List[Dict[str, str]]
 
 
 # ---------------------- Helpers ---------------------- #
@@ -699,6 +701,32 @@ async def market_search_node(state: AgentState) -> AgentState:
     return state
 
 
+async def market_refine_node(state: AgentState) -> AgentState:
+    """Uses LLM to filter and extract direct policy links from market data."""
+    if not state.get("market_context"):
+        state["refined_links"] = []
+        return state
+
+    chain = MARKET_REFINE_PROMPT | llm_json
+    market_str = "\n---\n".join(state.get("market_context", []))
+    
+    try:
+        response = await chain.ainvoke({
+            "market_data": market_str[:10000], # Limit context
+            "age": state.get("age") or "unknown",
+            "family_size": state.get("family_size") or "unknown",
+            "location": state.get("location") or "unknown",
+            "goal": state.get("goal") or "unknown"
+        })
+        data = json.loads(response.content if hasattr(response, "content") else response)
+        state["refined_links"] = data.get("refined_links", [])
+    except Exception as e:
+        logger.error(f"Failed to refine links: {e}")
+        state["refined_links"] = []
+    
+    return state
+
+
 async def policy_retriever_node(state: AgentState) -> AgentState:
     doc_url = state.get("documents")
     if not doc_url:
@@ -741,6 +769,7 @@ async def recommendation_node(state: AgentState) -> AgentState:
     response = await chain.ainvoke({
         "context": context_str,
         "market_data": market_str,
+        "refined_links": json.dumps(state.get("refined_links", []), indent=2),
         "age": state.get("age") or "Not specified",
         "family_size": state.get("family_size") or "Not specified",
         "pre_existing_conditions": state.get("pre_existing_conditions") or "Not specified",
@@ -764,12 +793,14 @@ def should_continue(state: AgentState):
 graph_builder = StateGraph(AgentState)
 graph_builder.add_node("information_gatherer_node", information_gatherer_node)
 graph_builder.add_node("market_search_node", market_search_node)
+graph_builder.add_node("market_refine_node", market_refine_node)
 graph_builder.add_node("policy_retriever_node", policy_retriever_node)
 graph_builder.add_node("recommendation_node", recommendation_node)
 
 graph_builder.add_edge(START, "information_gatherer_node")
 graph_builder.add_conditional_edges("information_gatherer_node", should_continue)
-graph_builder.add_edge("market_search_node", "policy_retriever_node")
+graph_builder.add_edge("market_search_node", "market_refine_node")
+graph_builder.add_edge("market_refine_node", "policy_retriever_node")
 graph_builder.add_edge("policy_retriever_node", "recommendation_node")
 graph_builder.add_edge("recommendation_node", END)
 
@@ -814,7 +845,8 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
         "market_context": [],
         "search_queries": [],
         "final_recommendation": "",
-        "next_question": ""
+        "next_question": "",
+        "refined_links": []
     }
 
     try:

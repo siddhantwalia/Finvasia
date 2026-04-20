@@ -25,6 +25,7 @@ const Intake = () => {
   const [done, setDone] = useState(false);
   const [recommendation, setRecommendation] = useState("");
   const [market, setMarket] = useState<IntakeResponse["market_context"]>([]);
+  const [refinedLinks, setRefinedLinks] = useState<IntakeResponse["refined_links"]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -50,6 +51,7 @@ const Intake = () => {
         setDone(true);
         setRecommendation(res.final_recommendation || "");
         setMarket(res.market_context || []);
+        setRefinedLinks(res.refined_links || []);
         if (res.next_question) setMessages((m) => [...m, { role: "agent", content: res.next_question }]);
       } else {
         setMessages((m) => [...m, { role: "agent", content: res.next_question || "(no question returned)" }]);
@@ -118,8 +120,33 @@ const Intake = () => {
                 <div className="prose prose-sm dark:prose-invert max-w-none">
                   <ReactMarkdown>{recommendation}</ReactMarkdown>
                 </div>
+                {refinedLinks && refinedLinks.length > 0 && (
+                  <div className="mt-4 grid gap-3">
+                    <div className="font-mono text-[11px] uppercase tracking-widest text-primary">
+                      // direct policy links
+                    </div>
+                    <div className="grid gap-2">
+                      {refinedLinks.map((link, i) => (
+                        <a
+                          key={i}
+                          href={link.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="group block p-3 border border-primary/20 bg-primary/5 hover:bg-primary/10 transition-all no-underline"
+                        >
+                          <div className="flex justify-between items-start gap-2">
+                            <span className="text-sm font-semibold text-primary group-hover:underline underline-offset-4">{link.label}</span>
+                            <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">direct ↗</span>
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-1 line-clamp-1">{link.reason}</p>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {market?.length > 0 && (
-                  <div className="mt-4 grid gap-2">
+                  <div className="mt-6 grid gap-2">
                     <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">
                       // market context
                     </div>

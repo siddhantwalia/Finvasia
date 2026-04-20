@@ -105,6 +105,7 @@ export interface IntakeResponse {
   intake_complete: boolean;
   final_recommendation: string;
   market_context: Array<{ title?: string; snippet?: string; url?: string } | string>;
+  refined_links?: Array<{ label: string; url: string; reason: string }>;
   extracted_profile: Record<string, unknown>;
 }
 

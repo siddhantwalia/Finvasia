@@ -184,7 +184,7 @@ SEARCH_QUERY_PROMPT = PromptTemplate(
     input_variables=["age", "family_size", "location", "goal"],
     template="""
 You are an expert insurance search strategist. 
-Based on the following user profile, generate 3-5 distinct, hyper-targeted Google/DuckDuckGo search queries to find the best current insurance policies and pricing.
+Based on the following user profile, generate 3-5 distinct, hyper-targeted search queries to find the best current insurance policies.
 
 User Profile:
 - Age: {age}
@@ -192,21 +192,56 @@ User Profile:
 - Location: {location}
 - Primary Goal: {goal}
 
-Focus on:
-1. Direct policy brochures for the current year.
-2. Comparison charts for the specific location.
-3. Reviews of the most popular plans matching the goal.
+Focus on finding:
+1. Official insurer product pages and direct buy portals (e.g., [Provider] [Plan] buy online).
+2. Direct links to current year policy brochures (PDFs) from provider sites.
+3. Specific plan detail pages for the given location and age group.
+
+Avoid generic aggregator homepages; try to get as deep into the provider's site as possible.
 
 You MUST respond with a JSON object containing a "queries" key:
 {{"queries": ["query 1", "query 2", "query 3"]}}
 """
 )
 
+MARKET_REFINE_PROMPT = PromptTemplate(
+    input_variables=["market_data", "age", "family_size", "location", "goal"],
+    template="""
+You are a precision link extractor. 
+Review the following search results and identify the TOP 3 most direct, relevant URLs for this user profile to buy or view specific policy details.
+
+User Profile:
+- Age: {age}
+- Family Size: {family_size}
+- Location: {location}
+- Goal: {goal}
+
+Search Results:
+{market_data}
+
+Rules:
+1. Prioritize official insurer websites (e.g., hdfcergo.com, nivabupa.com) over aggregators (policybazaar.com).
+2. Look for "Buy", "Product Page", or "Brochure" in the snippets.
+3. Ensure the plans mentioned are highly relevant to the User Profile.
+
+Respond ONLY with valid JSON:
+{{
+  "refined_links": [
+    {{
+      "label": "Brief descriptive name (e.g. HDFC Optima Restore)",
+      "url": "full_url",
+      "reason": "One short phrase why this fits (e.g. No copay for age 30)"
+    }}
+  ]
+}}
+"""
+)
+
 MARKET_ANALYSIS_PROMPT = PromptTemplate(
-    input_variables=["context", "market_data", "age", "family_size", "location", "goal", "budget"],
+    input_variables=["context", "market_data", "refined_links", "age", "family_size", "location", "goal", "budget"],
     template="""
 You are a warm, expert insurance advisor speaking directly to the user.
-Your goal is to give them personalized advice based on their profile and the real-time market data you found.
+I've done the heavy lifting and found some specific insurance options that match your profile.
 
 User Profile:
 - Age: {age}
@@ -218,17 +253,21 @@ User Profile:
 Internal Policy Context (If they uploaded a policy):
 {context}
 
-Real-Time Market Data (Fetched from the web):
+Verified Top Options (Direct Links):
+{refined_links}
+
+Additional Market Context:
 {market_data}
 
 Instructions:
-1. Speak in a friendly, conversational tone. Address the user directly (e.g., "Hi there! I've been looking into your options...").
-2. DO NOT use rigid headers. Let the conversation flow naturally.
-3. If they uploaded a policy, give them a simple review based on the market data.
-4. ACTIONABLE LINKS: Include markdown links to the specific providers or plans found in the market data. 
-5. NO HALLUCINATIONS: NEVER use "example.com", placeholder URLs, or make up links. If a specific source URL is not available in the market data, just mention the provider name or plan details without a link.
-6. Check the data for "Source:" URLs and use ONLY those for linking.
-7. Keep it concise, helpful, and empathetic. No emojis.
+1. Speak in a friendly, conversational tone. Address the user directly.
+2. Start by acknowledging their goal and briefly reviewing their uploaded policy (if any) against the market alternatives.
+3. PRESENT DIRECT LINKS: Clearly list the "Verified Top Options". Mention specifically that these are direct links to the plans. Use the labels provided.
+4. Explain WHY these particular plans were chosen based on their Age, Location, and Goal.
+5. If some providers were aggregators, focus on the specific plan benefit rather than the aggregator site.
+6. ACTIONABLE: Give them a clear next step.
+7. NEVER use "example.com" or made up links. Only use what I provided in the "Verified Top Options".
+8. Keep it concise, helpful, and empathetic. No emojis.
 """
 )
 
