@@ -171,7 +171,12 @@ const DocumentChat = () => {
           {messages.map((m, i) => (
             <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
               <div className={`max-w-[85%] px-4 py-3 border text-sm ${m.role === "user" ? "bg-primary/10 border-primary/40" : "bg-card border-border"}`}>
-                <ReactMarkdown className="intake-prose">{m.content}</ReactMarkdown>
+                <ReactMarkdown 
+                  className="intake-prose"
+                  components={{ a: ({ node, ...props }) => <a target="_blank" rel="noopener noreferrer" className="text-primary underline-offset-4 hover:underline" {...props} /> }}
+                >
+                  {m.content}
+                </ReactMarkdown>
               </div>
             </div>
           ))}
@@ -287,7 +292,12 @@ const PolicyFinder = () => {
           {messages.map((m, i) => (
             <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
               <div className={`max-w-[85%] px-4 py-3 border text-sm ${m.role === "user" ? "bg-primary/10 border-primary/40 text-foreground" : "bg-card border-border"}`}>
-                <ReactMarkdown className="intake-prose">{m.content}</ReactMarkdown>
+                <ReactMarkdown 
+                  className="intake-prose"
+                  components={{ a: ({ node, ...props }) => <a target="_blank" rel="noopener noreferrer" className="text-primary underline-offset-4 hover:underline" {...props} /> }}
+                >
+                  {m.content}
+                </ReactMarkdown>
               </div>
             </div>
           ))}
@@ -304,7 +314,12 @@ const PolicyFinder = () => {
             <div className="border border-primary/30 bg-primary/5 p-4 space-y-3">
               <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">// final recommendation</div>
               <div className="text-sm prose prose-invert max-w-none">
-                <ReactMarkdown className="intake-prose">{recommendation}</ReactMarkdown>
+                <ReactMarkdown 
+                  className="intake-prose"
+                  components={{ a: ({ node, ...props }) => <a target="_blank" rel="noopener noreferrer" className="text-primary underline-offset-4 hover:underline" {...props} /> }}
+                >
+                  {recommendation}
+                </ReactMarkdown>
               </div>
               {refinedLinks && refinedLinks.length > 0 && (
                 <div className="space-y-2 pt-2 border-t border-border">
@@ -421,7 +436,12 @@ const PolicyFinder = () => {
           <div className="quant-card p-4">
             <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground mb-3">// current_plan_snapshot</div>
             <div className="text-xs prose prose-invert max-w-none max-h-[300px] overflow-y-auto intake-prose">
-              <ReactMarkdown className="intake-prose">{existingPolicySummary}</ReactMarkdown>
+              <ReactMarkdown 
+                className="intake-prose"
+                components={{ a: ({ node, ...props }) => <a target="_blank" rel="noopener noreferrer" className="text-primary underline-offset-4 hover:underline" {...props} /> }}
+              >
+                {existingPolicySummary}
+              </ReactMarkdown>
             </div>
           </div>
         )}

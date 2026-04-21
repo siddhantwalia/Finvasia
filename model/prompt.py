@@ -232,7 +232,7 @@ Example: "car insurance Assam India direct buy" instead of just "car insurance A
 
 Focus on finding:
 1. Official insurer product pages and direct buy portals in the correct region (e.g., [Provider].in or [Provider] India).
-2. Direct links to current year policy brochures (PDFs) from local provider sites.
+2. DO NOT return links to PDF brochures or documentation. Find the ACTUAL policy vendor's site where a user can view or buy the policy.
 3. Specific plan detail pages for the given location and age group.
 
 Avoid global/US aggregators like GEICO or Progressive if the user is in India.
@@ -263,8 +263,9 @@ Search Results:
 
 Rules:
 1. Prioritize official insurer websites (e.g., hdfcergo.com, nivabupa.com, icicilombard.com) over aggregators.
-2. Look for "Buy", "Product Page", or "Brochure" in the snippets.
+2. Look for "Buy" or "Product Page" in the snippets. DO NOT return documentation, brochures, or PDF links. Return the ACTUAL policy vendor site where users can purchase or view the live plan.
 3. Ensure the plans mentioned are highly relevant to the User Profile and Region.
+4. ONLY USE EXACT URLs PROVIDED IN THE SEARCH RESULTS. NEVER invent, hallucinate, or format URLs as "example.com". If no direct URL exists for a plan, omit the plan.
 
 Respond ONLY with valid JSON:
 {{
@@ -317,7 +318,7 @@ Instructions:
 5. Explain WHY these particular plans were chosen based on their Age, Location, Goal, and Existing Plan gaps.
 6. REGION FIT: Ensure you only discuss plans that are valid for the user's location (e.g. if in India, focus on Indian insurers).
 7. ACTIONABLE: Give them a clear next step.
-8. NEVER use "example.com" or made up links. Only use what I provided in the "Verified Top Options".
+8. NEVER use "example.com" or made up links. You MUST explicitly use the actual exact links provided in "Verified Top Options".
 9. Keep it concise, helpful, and empathetic. No emojis.
 10. STRUCTURE: Use markdown headers (###), bullet points, and clearly separated paragraphs to present the comparison and benefits.
 """
