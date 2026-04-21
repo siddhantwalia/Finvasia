@@ -107,7 +107,8 @@ class IntakeRequest(BaseModel):
     location: Optional[str] = None
     goal: Optional[str] = None
     search_depth: Optional[str] = "basic"  # "basic" (snippets) or "deep" (crawled)
-    documents: Optional[str] = None
+    documents: Optional[str] = None  # Re-purposed/used for existing policy URL
+    has_existing_policy: Optional[str] = None
     
 class ExplainerRequest(BaseModel):
     snippet: str
@@ -133,6 +134,8 @@ class AgentState(TypedDict):
     auth_token: Optional[str]
     refined_links: List[Dict[str, str]]
     recommendation_generated: bool
+    has_existing_policy: Optional[str]
+    existing_policy_summary: Optional[str]
 
 
 # ---------------------- Helpers ---------------------- #
@@ -402,25 +405,22 @@ async def get_or_build_faiss(documents_url: str, auth_token: str = None) -> FAIS
         logger.exception("Embedding/Vector store error")
         raise HTTPException(status_code=500, detail=f"Embedding/Vector store error: {e}")
 
-    # 5. Conditional caching
-    if len(found_urls) == 0:
-        faiss_cache[doc_key] = db
-        if len(faiss_cache) > MAX_CACHE_SIZE:
-            faiss_cache.pop(next(iter(faiss_cache)))
-        logger.info("FAISS index built and cached")
-    else:
-        logger.info("Document contains URLs, skipping FAISS cache storage")
+    # 5. Cache the FAISS index (always — content is deterministic for the same doc)
+    faiss_cache[doc_key] = db
+    if len(faiss_cache) > MAX_CACHE_SIZE:
+        faiss_cache.pop(next(iter(faiss_cache)))
+    logger.info(f"FAISS index built and cached ({len(found_urls)} embedded URLs found)")
 
     return db
 
 
 # ---------------------- API ---------------------- #
-@app.get("/")
-async def home():
-    return {"home": "This is our unified API endpoint"}
+# @app.get("/")
+# async def home():
+#     return {"home": "This is our unified API endpoint"}
 
 
-@app.post("/hackrx/run")
+@app.post("/run")
 async def run_query(req: QueryRequest, Authorization: str = Header(default=None)):
     start = time.time()
     db = await get_or_build_faiss(req.documents, Authorization)
@@ -762,6 +762,7 @@ async def information_gatherer_node(state: AgentState) -> AgentState:
         "budget": state.get("budget") or "",
         "location": state.get("location") or "",
         "goal": state.get("goal") or "",
+        "has_existing_policy": state.get("has_existing_policy") or "",
         "current_recommendation": state.get("final_recommendation", "None yet."),
         "doc_context": doc_context,
     })
@@ -773,7 +774,7 @@ async def information_gatherer_node(state: AgentState) -> AgentState:
         data = {}
 
     # Change detection
-    fields = ["age", "family_size", "pre_existing_conditions", "budget", "location", "goal"]
+    fields = ["age", "family_size", "pre_existing_conditions", "budget", "location", "goal", "has_existing_policy"]
     any_change = False
     for f in fields:
         new_val = data.get(f)
@@ -795,24 +796,117 @@ async def information_gatherer_node(state: AgentState) -> AgentState:
     return state
 
 
+# ---- Existing Policy Analysis Node ---- #
+async def existing_policy_analysis_node(state: AgentState) -> AgentState:
+    """Summarizes the user's existing policy for side-by-side comparison."""
+    doc_url = state.get("documents")
+    if not doc_url or state.get("existing_policy_summary"):
+        # No doc attached or already summarized — skip
+        return state
+
+    logger.info(f"Analyzing existing policy: {doc_url[:60]}")
+    try:
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        from model import NomicEmbeddings
+
+        parsed_docs = await parse_document_from_url(doc_url)
+        small_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
+        small_chunks = small_splitter.split_documents(parsed_docs)
+        embedding_model = NomicEmbeddings()
+        small_db = await build_faiss_concurrent(small_chunks, embedding_model, batch_size=64, max_concurrent=3)
+        retriever = small_db.as_retriever(search_kwargs={"k": 10})
+
+        # Multi-pass retrieval for comprehensive summary
+        queries = [
+            "sum insured coverage amount premium benefits",
+            "exclusions not covered waiting period limitation",
+            "co-payment room rent sub-limit cap deductible",
+            "maternity OPD ambulance ICU daycare",
+        ]
+        seen, unique_content = set(), []
+        for q in queries:
+            for doc in await asyncio.to_thread(retriever.invoke, q):
+                if doc.page_content not in seen:
+                    unique_content.append(doc.page_content)
+                    seen.add(doc.page_content)
+
+        context = "\n---\n".join(unique_content)[:5000]
+
+        summary_prompt = f"""You are an insurance analyst. Summarize this policy in a structured comparison-ready format.
+
+Policy Sections:
+{context}
+
+Provide a concise summary covering:
+1. **Policy Name & Insurer**
+2. **Sum Insured / Coverage Amount**
+3. **Key Benefits** (room rent, ICU, ambulance, OPD, maternity, daycare)
+4. **Sub-limits & Caps** (any limits per benefit)
+5. **Co-payments / Deductibles**
+6. **Waiting Periods** (pre-existing, specific diseases)
+7. **Major Exclusions** (top 5 things NOT covered)
+8. **Renewal Terms**
+
+Be factual. Use the exact numbers from the document. If a field is not mentioned, say "Not specified".
+
+Summary:"""
+
+        response = await llm.ainvoke(summary_prompt)
+        state["existing_policy_summary"] = clean_output(response)
+        logger.info(f"Existing policy summary generated: {len(state['existing_policy_summary'])} chars")
+    except Exception as e:
+        logger.error(f"Failed to analyze existing policy: {e}")
+        state["existing_policy_summary"] = "Could not analyze the uploaded policy."
+
+    return state
+
+
 async def robust_web_search(query: str, search_depth: str = "basic") -> List[str]:
     """
-    Tries SerpApi if key is present, else falls back to DuckDuckGo/LiteSearch.
+    Tries SerpApi Google AI Mode first, falls back to regular Google, then DuckDuckGo.
     Returns a list of snippet strings.
     """
     findings = []
     
-    # 1. Try SerpApi (Premium)
+    # 1. Try SerpApi Google AI Mode (Premium — synthesized answer + references)
     if SERP_API_KEY:
         try:
-            logger.info(f"Using SerpApi for query: {query}")
+            logger.info(f"Using SerpApi Google AI Mode for: {query}")
+            params = {
+                "q": query,
+                "api_key": SERP_API_KEY,
+                "engine": "google_ai_mode",
+            }
+            search = await asyncio.to_thread(GoogleSearch, params)
+            resultsBody = search.get_dict()
+
+            # Extract the AI-synthesized markdown answer
+            ai_markdown = resultsBody.get("reconstructed_markdown", "")
+            if ai_markdown:
+                findings.append(f"Source: Google AI Mode\nTitle: AI Overview\nSnippet: {ai_markdown[:3000]}")
+
+            # Extract all references with links
+            references = resultsBody.get("references", [])
+            for ref in references[:5]:
+                ref_text = f"Source: {ref.get('link', '')}\nTitle: {ref.get('title', '')}\nSnippet: {ref.get('snippet', '')}"
+                findings.append(ref_text)
+
+            if findings:
+                logger.info(f"Google AI Mode returned {len(findings)} results")
+                return findings
+        except Exception as e:
+            logger.warning(f"Google AI Mode failed, falling back to regular search: {e}")
+
+    # 2. Fallback: Try SerpApi regular Google search
+    if SERP_API_KEY:
+        try:
+            logger.info(f"Fallback: Using SerpApi regular Google for: {query}")
             params = {
                 "q": query,
                 "api_key": SERP_API_KEY,
                 "engine": "google",
                 "num": 5
             }
-            # Run in thread to avoid blocking
             search = await asyncio.to_thread(GoogleSearch, params)
             resultsBody = search.get_dict()
             
@@ -1019,7 +1113,8 @@ async def recommendation_node(state: AgentState) -> AgentState:
         "pre_existing_conditions": state.get("pre_existing_conditions") or "Not specified",
         "budget": state.get("budget") or "Not specified",
         "location": state.get("location") or "Not specified",
-        "goal": state.get("goal") or "Not specified"
+        "goal": state.get("goal") or "Not specified",
+        "existing_policy_summary": state.get("existing_policy_summary") or "No existing policy provided."
     })
 
     state["final_recommendation"] = clean_output(response)
@@ -1033,7 +1128,9 @@ def should_continue(state: AgentState):
         return END
 
     if state.get("intake_complete"):
-        # If intake is complete, but we haven't generated a recommendation yet (or we're re-triggering), proceed.
+        # Route: if user has an existing policy that hasn't been summarized yet, analyze it first
+        if state.get("has_existing_policy") == "yes" and state.get("documents") and not state.get("existing_policy_summary"):
+            return "existing_policy_analysis_node"
         return "market_search_node"
     else:
         return END
@@ -1042,6 +1139,7 @@ def should_continue(state: AgentState):
 # Compile Graph
 graph_builder = StateGraph(AgentState)
 graph_builder.add_node("information_gatherer_node", information_gatherer_node)
+graph_builder.add_node("existing_policy_analysis_node", existing_policy_analysis_node)
 graph_builder.add_node("market_search_node", market_search_node)
 graph_builder.add_node("market_refine_node", market_refine_node)
 graph_builder.add_node("policy_retriever_node", policy_retriever_node)
@@ -1049,6 +1147,7 @@ graph_builder.add_node("recommendation_node", recommendation_node)
 
 graph_builder.add_edge(START, "information_gatherer_node")
 graph_builder.add_conditional_edges("information_gatherer_node", should_continue)
+graph_builder.add_edge("existing_policy_analysis_node", "market_search_node")
 graph_builder.add_edge("market_search_node", "market_refine_node")
 graph_builder.add_edge("market_refine_node", "policy_retriever_node")
 graph_builder.add_edge("policy_retriever_node", "recommendation_node")
@@ -1087,6 +1186,8 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
         "budget": pick("budget"),
         "location": pick("location"),
         "goal": pick("goal"),
+        "has_existing_policy": pick("has_existing_policy"),
+        "existing_policy_summary": prev.get("existing_policy_summary"),
         "search_depth": req.search_depth or prev.get("search_depth", "basic"),
         "documents": pick("documents"),
         "auth_token": Authorization,
@@ -1111,6 +1212,8 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
             "budget": final_state.get("budget"),
             "location": final_state.get("location"),
             "goal": final_state.get("goal"),
+            "has_existing_policy": final_state.get("has_existing_policy"),
+            "existing_policy_summary": final_state.get("existing_policy_summary"),
             "search_depth": final_state.get("search_depth", "basic"),
             "documents": final_state.get("documents"),
             "chat_history": final_state.get("chat_history", []),
@@ -1119,6 +1222,7 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
             "final_recommendation": final_state.get("final_recommendation", ""),
             "market_context": final_state.get("market_context", []),
             "refined_links": final_state.get("refined_links", []),
+            "intake_complete": final_state.get("intake_complete", False),
         }
 
         # ---- Build frontend-friendly response ----
@@ -1132,6 +1236,7 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
             "market_context": final_state.get("market_context", []),
             "refined_links": final_state.get("refined_links", []),
             "extracted_profile": extracted_profile,
+            "existing_policy_summary": final_state.get("existing_policy_summary", ""),
         }
     except Exception as e:
         logger.exception("Agent graph failed")

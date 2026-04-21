@@ -32,8 +32,8 @@ async function post<T>(path: string, body: unknown, signal?: AbortSignal): Promi
 }
 
 async function streamPost(
-  path: string, 
-  body: unknown, 
+  path: string,
+  body: unknown,
   onChunk: (chunk: string) => void,
   signal?: AbortSignal
 ): Promise<void> {
@@ -43,7 +43,7 @@ async function streamPost(
     body: JSON.stringify(body),
     signal,
   });
-  
+
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`${res.status} ${res.statusText}${text ? ` — ${text}` : ""}`);
@@ -58,13 +58,13 @@ async function streamPost(
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    
+
     buffer += decoder.decode(value, { stream: true });
-    
+
     // Server-Sent Events are separated by \n\n
     const lines = buffer.split("\n\n");
     buffer = lines.pop() || ""; // Keep the incomplete line in the buffer
-    
+
     for (const line of lines) {
       if (line.startsWith("data: ")) {
         const dataStr = line.slice(6).trim();
@@ -98,6 +98,7 @@ export interface IntakeRequest {
   goal?: string | null;
   search_depth?: SearchDepth;
   documents?: string | null;
+  has_existing_policy?: string | null;
 }
 
 export interface IntakeResponse {
@@ -107,6 +108,7 @@ export interface IntakeResponse {
   market_context: Array<{ title?: string; snippet?: string; url?: string } | string>;
   refined_links?: Array<{ label: string; url: string; reason: string }>;
   extracted_profile: Record<string, unknown>;
+  existing_policy_summary?: string;
 }
 
 export type StatusColor = "green" | "red" | "yellow" | "gray";
@@ -169,7 +171,7 @@ export const api = {
     return res.json();
   },
   hackrx: (b: { documents: string; questions: string[] }, s?: AbortSignal) =>
-    post<HackrxResponse>("/hackrx/run", b, s),
+    post<HackrxResponse>("/run", b, s),
   explainSnippet: (b: { snippet: string }, onChunk: (chunk: string) => void, s?: AbortSignal) =>
     streamPost("/explain_snippet", b, onChunk, s),
 };

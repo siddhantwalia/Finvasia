@@ -33,7 +33,7 @@ const QA = () => {
     <Shell>
       <PageHeader
         index="06"
-        kicker="POST /hackrx/run"
+        kicker="POST /run"
         title="Ask the document anything."
         blurb="Direct retrieval-augmented Q&A. Cached vector indices keep follow-ups under a second."
       />

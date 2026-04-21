@@ -216,11 +216,27 @@ const PolicyFinder = () => {
   const [recommendation, setRecommendation] = useState("");
   const [market, setMarket] = useState<IntakeResponse["market_context"]>([]);
   const [refinedLinks, setRefinedLinks] = useState<IntakeResponse["refined_links"]>([]);
+  const [existingPolicyUrl, setExistingPolicyUrl] = useState<string | null>(null);
+  const [existingPolicySummary, setExistingPolicySummary] = useState("");
+  const [uploading, setUploading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, loading]);
+
+  const handlePolicyUpload = async (file: File) => {
+    setUploading(true);
+    try {
+      const { url } = await api.uploadPolicy(file);
+      setExistingPolicyUrl(url);
+      toast.success("Policy uploaded", { description: "Your existing policy will be analyzed for comparison." });
+    } catch (e: any) {
+      toast.error("Upload failed", { description: e?.message });
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const send = async () => {
     if (!input.trim() || loading) return;
@@ -229,9 +245,15 @@ const PolicyFinder = () => {
     setMessages((m) => [...m, { role: "user", content: text }]);
     setLoading(true);
     try {
-      const body: IntakeRequest = { session_id: sessionId, user_input: text, search_depth: "basic" };
+      const body: IntakeRequest = {
+        session_id: sessionId,
+        user_input: text,
+        search_depth: "basic",
+        ...(existingPolicyUrl ? { documents: existingPolicyUrl, has_existing_policy: "yes" } : {}),
+      };
       const res = await api.intake(body);
       setProfile(res.extracted_profile || {});
+      if (res.existing_policy_summary) setExistingPolicySummary(res.existing_policy_summary);
       if (res.intake_complete) {
         setDone(true);
         setRecommendation(res.final_recommendation || "");
@@ -295,23 +317,57 @@ const PolicyFinder = () => {
                   ))}
                 </div>
               )}
-              {market && market.length > 0 && (
-                <div className="space-y-1.5 pt-2 border-t border-border">
-                  <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">// market context</div>
-                  <ul className="space-y-1.5">
-                    {market.map((m, i) => {
-                      const obj = typeof m === "string" ? { snippet: m } : m;
-                      return (
-                        <li key={i} className="text-xs text-muted-foreground border-l-2 border-border pl-3">
-                          {obj.title && <span className="text-foreground font-medium">{obj.title} — </span>}
-                          {obj.snippet}
-                          {obj.url && <a href={obj.url} target="_blank" rel="noreferrer" className="ml-1 text-primary underline-offset-4 hover:underline">↗</a>}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              )}
+              {market && market.length > 0 && (() => {
+                // Parse raw string market items into structured objects
+                const parsed = market.map((m) => {
+                  if (typeof m === "string") {
+                    const sourceMatch = m.match(/^Source:\s*(.+)/m);
+                    const titleMatch = m.match(/^Title:\s*(.+)/m);
+                    const snippetMatch = m.match(/^Snippet:\s*([\s\S]+?)$/m);
+                    const url = sourceMatch?.[1]?.trim();
+                    const title = titleMatch?.[1]?.trim();
+                    const snippet = snippetMatch?.[1]?.trim();
+                    return { url, title, snippet };
+                  }
+                  return m;
+                }).filter((s) => s.title && s.title !== "AI Overview"); // Skip the AI overview (already in recommendation)
+
+                if (parsed.length === 0) return null;
+
+                return (
+                  <div className="space-y-2 pt-3 border-t border-border">
+                    <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">// sources ({parsed.length})</div>
+                    <div className="grid gap-2">
+                      {parsed.map((s, i) => {
+                        const domain = s.url ? (() => { try { return new URL(s.url).hostname.replace("www.", ""); } catch { return ""; } })() : "";
+                        return (
+                          <a
+                            key={i}
+                            href={s.url || "#"}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="group block border border-border/60 hover:border-primary/40 p-3 transition-colors"
+                          >
+                            <div className="flex items-center gap-2 mb-1">
+                              {domain && (
+                                <img
+                                  src={`https://www.google.com/s2/favicons?domain=${domain}&sz=16`}
+                                  alt=""
+                                  className="h-3.5 w-3.5 rounded-sm opacity-60 group-hover:opacity-100"
+                                />
+                              )}
+                              <span className="font-mono text-[10px] text-muted-foreground truncate">{domain}</span>
+                              <span className="ml-auto text-[10px] text-primary opacity-0 group-hover:opacity-100 transition-opacity">↗</span>
+                            </div>
+                            {s.title && <div className="text-xs font-medium text-foreground line-clamp-1">{s.title}</div>}
+                            {s.snippet && <div className="text-[11px] text-muted-foreground line-clamp-2 mt-0.5">{s.snippet}</div>}
+                          </a>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>
@@ -334,6 +390,43 @@ const PolicyFinder = () => {
 
       {/* Sidecar */}
       <aside className="space-y-4">
+        {/* Existing Policy Upload */}
+        <div className="quant-card p-4">
+          <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground mb-3">// existing_policy</div>
+          {existingPolicyUrl ? (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <FileText className="h-4 w-4 text-primary" />
+                <span className="font-mono text-xs text-primary truncate">{existingPolicyUrl.split("/").pop()}</span>
+              </div>
+              <p className="text-[11px] text-muted-foreground">Attached — will be compared against market options.</p>
+            </div>
+          ) : (
+            <label className="block border border-dashed border-border p-4 text-center cursor-pointer hover:border-primary/50 transition-colors">
+              <input type="file" accept=".pdf,.docx" className="hidden" onChange={(e) => e.target.files?.[0] && handlePolicyUpload(e.target.files[0])} />
+              {uploading ? (
+                <Loader2 className="h-4 w-4 animate-spin mx-auto text-muted-foreground" />
+              ) : (
+                <>
+                  <FileText className="h-5 w-5 mx-auto mb-1.5 text-muted-foreground" />
+                  <p className="text-[11px] text-muted-foreground">Upload your current policy for comparison</p>
+                </>
+              )}
+            </label>
+          )}
+        </div>
+
+        {/* Existing Policy Summary */}
+        {existingPolicySummary && (
+          <div className="quant-card p-4">
+            <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground mb-3">// current_plan_snapshot</div>
+            <div className="text-xs prose prose-invert max-w-none max-h-[300px] overflow-y-auto">
+              <ReactMarkdown>{existingPolicySummary}</ReactMarkdown>
+            </div>
+          </div>
+        )}
+
+        {/* Profile */}
         <div className="quant-card p-4">
           <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground mb-3">// extracted_profile</div>
           {profileEntries.length === 0 ? (
