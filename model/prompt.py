@@ -128,14 +128,15 @@ Policy Context:
 Guidelines:
 - Explain if the service is covered, partially covered, or excluded.
 - Reference specific policy clauses.
-- Estimate out-of-pocket costs based on copays/deductibles found in the context.
+- Estimate out-of-pocket costs. Out-of-pocket means the amount the user must PAY out of their own wallet (e.g., deductibles, co-pays, expenses exceeding sub-limits, or excluded items). 
+- CRITICAL: Do not confuse "benefit limits" or "allowances" (which is money paid TO the user by the insurer) as an out-of-pocket cost. If the bill is fully covered within limits and there are no deductibles/copays, out-of-pocket is 0.
 - Be precise and use plain English.
 
 Response Format (JSON):
 {{
   "is_covered": boolean,
   "status": "Covered" | "Partially Covered" | "Excluded",
-  "estimated_out_of_pocket": "string with currency",
+  "estimated_out_of_pocket": "string with currency (e.g., Rs. 0, Rs. 500)",
   "explanation": "Clear explanation of the decision.",
   "relevant_clause": "Excerpt of the policy rule used"
 }}

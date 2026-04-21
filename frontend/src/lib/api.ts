@@ -147,6 +147,8 @@ export interface HackrxResponse {
 
 export const api = {
   intake: (b: IntakeRequest, s?: AbortSignal) => post<IntakeResponse>("/chat/intake", b, s),
+  documentChat: (b: { document_url: string; question: string; chat_history?: string[] }, s?: AbortSignal) =>
+    post<{ answer: string; context_chunks: number }>("/chat/document", b, s),
   simulate: (b: { policy_url: string; scenario: string; user_profile?: Record<string, unknown> }, s?: AbortSignal) =>
     post<ScenarioResponse>("/simulate_scenario", b, s),
   visualSummary: (b: { policy_url: string }, s?: AbortSignal) =>

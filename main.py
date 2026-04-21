@@ -7,7 +7,7 @@ import json
 from collections import OrderedDict
 import os
 import uuid
-from fastapi import FastAPI, Header, HTTPException, File, UploadFile
+from fastapi import FastAPI, Header, HTTPException, File, UploadFile, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
@@ -454,6 +454,85 @@ async def run_query(req: QueryRequest, Authorization: str = Header(default=None)
 
 
 
+class DocumentChatRequest(BaseModel):
+    document_url: str
+    question: str
+    chat_history: Optional[List[str]] = []  # e.g. ["User: ...", "Agent: ..."]
+
+@app.post("/chat/document")
+async def chat_document(req: DocumentChatRequest, Authorization: str = Header(default=None)):
+    """
+    RAG-powered document Q&A with conversation memory.
+    Uses small chunks for better granularity and multi-pass retrieval.
+    """
+    # Small-chunk FAISS (not cached globally — using a separate key)
+    import hashlib
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from model import NomicEmbeddings
+    
+    doc_cache_key = "doc_chat_" + hashlib.sha256(req.document_url.encode()).hexdigest()
+    if doc_cache_key not in faiss_cache:
+        try:
+            parsed_docs = await parse_document_from_url(req.document_url)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Cannot parse document: {e}")
+        
+        small_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
+        small_chunks = small_splitter.split_documents(parsed_docs)
+        embedding_model = NomicEmbeddings()
+        small_db = await build_faiss_concurrent(small_chunks, embedding_model, batch_size=64, max_concurrent=3)
+        faiss_cache[doc_cache_key] = small_db
+        logger.info(f"Built doc chat FAISS: {len(small_chunks)} chunks for {req.document_url[:50]}")
+    
+    small_db = faiss_cache[doc_cache_key]
+    retriever = small_db.as_retriever(search_kwargs={"k": 6})
+    
+    # Multi-pass retrieval: use question + rephrase using recent history for better recall
+    history_str = "\n".join(req.chat_history[-6:]) if req.chat_history else ""
+    queries = [req.question]
+    
+    # Add a paraphrased fallback query based on key terms in the question
+    keywords = " ".join(w for w in req.question.split() if len(w) > 3)
+    if keywords != req.question:
+        queries.append(keywords)
+    
+    seen, unique_content = set(), []
+    for q in queries:
+        for doc in await asyncio.to_thread(retriever.invoke, q):
+            if doc.page_content not in seen:
+                unique_content.append(doc.page_content)
+                seen.add(doc.page_content)
+    
+    context = "\n---\n".join(unique_content)[:5000]
+    
+    # Build prompt with conversation memory
+    doc_qa_prompt = f"""You are a helpful insurance policy expert answering questions about a specific policy document and conversing with the user.
+
+Conversation History (for context & memory):
+{history_str or "No prior conversation."}
+
+Relevant Policy Sections:
+{context}
+
+User's Question: {req.question}
+
+INSTRUCTIONS:
+1. Use the "Relevant Policy Sections" to answer questions about the policy document.
+2. You MUST ALSO use the "Conversation History" to recall any information the user has shared about themselves (e.g. their age, name, etc.) and to understand follow-up contexts.
+3. If the user asks about something they already told you (like "what is my age"), answer based on the Conversation History.
+4. Quote specific clauses or numbers where relevant when answering policy questions.
+5. Fix typos in the question using context clues (e.g. "iscount" → "discount").
+6. If the user asks a policy-specific question and the policy sections don't contain the answer, say: "I couldn't find this in the uploaded document — try asking differently."
+7. Keep answers concise and clear.
+
+Answer:"""
+
+    response = await llm.ainvoke(doc_qa_prompt)
+    answer = clean_output(response)
+    
+    return {"answer": answer, "context_chunks": len(unique_content)}
+
+
 @app.post("/simulate_scenario")
 async def simulate_scenario(req: ScenarioRequest, Authorization: str = Header(default=None)):
     """Adjudicate a hypothetical scenario against a policy."""
@@ -618,8 +697,8 @@ async def explain_snippet(req: ExplainerRequest):
 
 
 @app.post("/upload_policy")
-async def upload_policy(file: UploadFile = File(...)):
-    """Upload a policy file and return its local static URL."""
+async def upload_policy(request: Request, file: UploadFile = File(...)):
+    """Upload a policy file and return its absolute URL."""
     # Validate extension
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in [".pdf", ".docx", ".png", ".jpg", ".jpeg"]:
@@ -637,10 +716,9 @@ async def upload_policy(file: UploadFile = File(...)):
     with open(file_path, "wb") as f:
         f.write(file_content)
 
-    # Return local static URL
-    # In a real app, you'd use the base URL from the request, but for now we'll assume localhost:8000
-    # or handle it on the frontend by prepending the base URL.
-    return {"url": f"/uploads/{unique_filename}"}
+    # Return absolute URL so parse_document_from_url can fetch it
+    base = str(request.base_url).rstrip("/")
+    return {"url": f"{base}/uploads/{unique_filename}"}
 
 
 @app.get("/proxy_pdf")
