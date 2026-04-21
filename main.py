@@ -109,6 +109,7 @@ class IntakeRequest(BaseModel):
     search_depth: Optional[str] = "basic"  # "basic" (snippets) or "deep" (crawled)
     documents: Optional[str] = None  # Re-purposed/used for existing policy URL
     has_existing_policy: Optional[str] = None
+    other_info: Optional[str] = None
     
 class ExplainerRequest(BaseModel):
     snippet: str
@@ -123,6 +124,7 @@ class AgentState(TypedDict):
     budget: Optional[str]
     location: Optional[str]
     goal: Optional[str]
+    other_info: Optional[str]
     search_depth: str
     market_context: List[str]
     search_queries: List[str]
@@ -763,6 +765,7 @@ async def information_gatherer_node(state: AgentState) -> AgentState:
         "location": state.get("location") or "",
         "goal": state.get("goal") or "",
         "has_existing_policy": state.get("has_existing_policy") or "",
+        "other_info": state.get("other_info") or "",
         "current_recommendation": state.get("final_recommendation", "None yet."),
         "doc_context": doc_context,
     })
@@ -774,7 +777,7 @@ async def information_gatherer_node(state: AgentState) -> AgentState:
         data = {}
 
     # Change detection
-    fields = ["age", "family_size", "pre_existing_conditions", "budget", "location", "goal", "has_existing_policy"]
+    fields = ["age", "family_size", "pre_existing_conditions", "budget", "location", "goal", "has_existing_policy", "other_info"]
     any_change = False
     for f in fields:
         new_val = data.get(f)
@@ -1002,7 +1005,8 @@ async def market_search_node(state: AgentState) -> AgentState:
             "age": state.get("age") or "unknown",
             "family_size": state.get("family_size") or "unknown",
             "location": state.get("location") or "unknown",
-            "goal": state.get("goal") or "unknown"
+            "goal": state.get("goal") or "unknown",
+            "other_info": state.get("other_info") or "unknown"
         })
 
         raw = response.content if hasattr(response, "content") else response
@@ -1054,7 +1058,8 @@ async def market_refine_node(state: AgentState) -> AgentState:
             "age": state.get("age") or "unknown",
             "family_size": state.get("family_size") or "unknown",
             "location": state.get("location") or "unknown",
-            "goal": state.get("goal") or "unknown"
+            "goal": state.get("goal") or "unknown",
+            "other_info": state.get("other_info") or "unknown"
         })
         data = json.loads(response.content if hasattr(response, "content") else response)
         state["refined_links"] = data.get("refined_links", [])
@@ -1114,6 +1119,7 @@ async def recommendation_node(state: AgentState) -> AgentState:
         "budget": state.get("budget") or "Not specified",
         "location": state.get("location") or "Not specified",
         "goal": state.get("goal") or "Not specified",
+        "other_info": state.get("other_info") or "Not specified",
         "existing_policy_summary": state.get("existing_policy_summary") or "No existing policy provided."
     })
 
@@ -1187,6 +1193,7 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
         "location": pick("location"),
         "goal": pick("goal"),
         "has_existing_policy": pick("has_existing_policy"),
+        "other_info": pick("other_info"),
         "existing_policy_summary": prev.get("existing_policy_summary"),
         "search_depth": req.search_depth or prev.get("search_depth", "basic"),
         "documents": pick("documents"),
@@ -1213,6 +1220,7 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
             "location": final_state.get("location"),
             "goal": final_state.get("goal"),
             "has_existing_policy": final_state.get("has_existing_policy"),
+            "other_info": final_state.get("other_info"),
             "existing_policy_summary": final_state.get("existing_policy_summary"),
             "search_depth": final_state.get("search_depth", "basic"),
             "documents": final_state.get("documents"),
@@ -1226,7 +1234,7 @@ async def chat_intake(req: IntakeRequest, Authorization: str = Header(default=No
         }
 
         # ---- Build frontend-friendly response ----
-        profile_fields = ["age", "family_size", "pre_existing_conditions", "budget", "location", "goal"]
+        profile_fields = ["age", "family_size", "pre_existing_conditions", "budget", "location", "goal", "other_info"]
         extracted_profile = {k: final_state.get(k) for k in profile_fields if final_state.get(k)}
 
         return {

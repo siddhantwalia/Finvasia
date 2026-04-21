@@ -99,6 +99,7 @@ export interface IntakeRequest {
   search_depth?: SearchDepth;
   documents?: string | null;
   has_existing_policy?: string | null;
+  other_info?: string | null;
 }
 
 export interface IntakeResponse {

@@ -28,12 +28,12 @@ Answer:
 )
 
 INTAKE_AGENT_PROMPT = PromptTemplate(
-    input_variables=["chat_history", "user_input", "age", "family_size", "pre_existing_conditions", "budget", "location", "goal", "has_existing_policy", "current_recommendation", "doc_context"],
+    input_variables=["chat_history", "user_input", "age", "family_size", "pre_existing_conditions", "budget", "location", "goal", "has_existing_policy", "other_info", "current_recommendation", "doc_context"],
     template="""
 You are a warm, expert insurance advisor having a natural, human-to-human conversation. 
-Your goal is to gather 7 key details to help find the perfect policy, but you MUST do so in a friendly, conversational way—not as a robot filling a form.
+Your goal is to gather 8 key details to help find the perfect policy, but you MUST do so in a friendly, conversational way—not as a robot filling a form.
 
-The 7 fields:
+The 8 fields:
 1. age — numeric age
 2. family_size — e.g. "single", "couple", "family of 4"
 3. pre_existing_conditions — e.g. "none", "diabetes", "hypertension"
@@ -41,6 +41,7 @@ The 7 fields:
 5. location — city/state/country
 6. goal — what they want from insurance, e.g. "life cover", "health cover", "cheapest option"
 7. has_existing_policy — e.g. "yes", "no", "unknown" (Ask if they currently have a policy they want to upgrade from/compare against.)
+8. other_info — e.g. "smoker", "hazardous occupation", "sports activities" (Ask if they have any other specific habits or information that might affect policy search.)
 
 ALREADY COLLECTED (do NOT re-ask these):
   age: {age}
@@ -50,6 +51,7 @@ ALREADY COLLECTED (do NOT re-ask these):
   location: {location}
   goal: {goal}
   has_existing_policy: {has_existing_policy}
+  other_info: {other_info}
 
 FULL CONVERSATION SO FAR:
 {chat_history}
@@ -67,7 +69,7 @@ PHASE 1: INFORMATION GATHERING
 - BE HUMAN: Always acknowledge what the user just said before moving to the next question. Use phrases like "That makes sense," "Got it," or "I'd love to help with that."
 - BE SMART: Extract all info you can. "for myself" means single. "I'm healthy" means no pre-existing conditions. "India" is a location.
 - ONE AT A TIME: If multiple fields are missing, ask about just ONE in a natural way. Never list several questions at once.
-- PROGRESSION: When ALL 6 fields have values, set intake_complete to true and leave next_question empty.
+- PROGRESSION: When ALL 8 fields have values, set intake_complete to true and leave next_question empty.
 
 PHASE 2: CONVERSATIONAL SUPPORT (If intake is already complete)
 - If the user is asking follow-up questions about the recommendations, answer them conversationally using the "current_recommendation" context.
@@ -90,6 +92,7 @@ Respond ONLY with valid JSON:
   "location": "extracted_value_or_prev",
   "goal": "extracted_value_or_prev",
   "has_existing_policy": "extracted_value_or_prev",
+  "other_info": "extracted_value_or_prev",
   "next_question": "a friendly, conversational response",
   "intake_complete": true_or_false
 }}
@@ -97,7 +100,7 @@ Respond ONLY with valid JSON:
 )
 
 RECOMMENDATION_AGENT_PROMPT = PromptTemplate(
-    input_variables=["context", "age", "family_size", "pre_existing_conditions", "budget", "location", "goal"],
+    input_variables=["context", "age", "family_size", "pre_existing_conditions", "budget", "location", "goal", "other_info"],
     template="""
 You are an expert insurance advisor.
 Based on the provided policy documents and the user's specific profile, pitch the best policy option.
@@ -109,6 +112,7 @@ User Profile:
 - Budget: {budget}
 - Location: {location}
 - Primary Goal: {goal}
+- Other Info: {other_info}
 
 Policy Context:
 {context}
@@ -210,7 +214,7 @@ Respond ONLY with a valid JSON array:
 )
 
 SEARCH_QUERY_PROMPT = PromptTemplate(
-    input_variables=["age", "family_size", "location", "goal"],
+    input_variables=["age", "family_size", "location", "goal", "other_info"],
     template="""
 You are an expert insurance search strategist. 
 Based on the following user profile, generate 3-5 distinct, hyper-targeted search queries to find the best current insurance policies.
@@ -220,6 +224,7 @@ User Profile:
 - Family Size: {family_size}
 - Location: {location}
 - Primary Goal: {goal}
+- Other Info: {other_info}
 
 REGION CRITICAL: 
 If the location is in India (e.g., states like Assam, Punjab, cities like Delhi, Mumbai), you MUST include "India" in every search query. 
@@ -238,7 +243,7 @@ You MUST respond with a JSON object containing a "queries" key:
 )
 
 MARKET_REFINE_PROMPT = PromptTemplate(
-    input_variables=["market_data", "age", "family_size", "location", "goal"],
+    input_variables=["market_data", "age", "family_size", "location", "goal", "other_info"],
     template="""
 You are a precision link extractor. 
 Review the following search results and identify the TOP 3 most direct, relevant URLs for this user profile to buy or view specific policy details.
@@ -248,6 +253,7 @@ User Profile:
 - Family Size: {family_size}
 - Location: {location}
 - Goal: {goal}
+- Other Info: {other_info}
 
 REGION CHECK:
 If the location is in India, REJECT any USA-only or global providers that do not operate in India (e.g., GEICO, State Farm, Allstate, Progressive). Only accept providers that offer coverage in the user's region.
@@ -274,7 +280,7 @@ Respond ONLY with valid JSON:
 )
 
 MARKET_ANALYSIS_PROMPT = PromptTemplate(
-    input_variables=["context", "market_data", "refined_links", "age", "family_size", "location", "goal", "budget", "existing_policy_summary"],
+    input_variables=["context", "market_data", "refined_links", "age", "family_size", "location", "goal", "budget", "other_info", "existing_policy_summary"],
     template="""
 You are a warm, expert insurance advisor speaking directly to the user.
 I've done the heavy lifting and found some specific insurance options that match your profile.
@@ -285,6 +291,7 @@ User Profile:
 - Location: {location}
 - Goal: {goal}
 - Budget: {budget}
+- Other Info: {other_info}
 
 Existing Policy Summary (Baseline to Compare Against):
 {existing_policy_summary}
