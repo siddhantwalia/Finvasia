@@ -171,3 +171,64 @@
   100% { transform: translateX(-50%); }
 }
 .animate-ticker { animation: ticker 40s linear infinite; }
+
+/* ─── Prose styles for ReactMarkdown in Intake chat ─── */
+.intake-prose h1,
+.intake-prose h2,
+.intake-prose h3 {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 600;
+  margin-top: 1.25em;
+  margin-bottom: 0.5em;
+  color: hsl(var(--foreground));
+}
+.intake-prose h2 { font-size: 0.95rem; }
+.intake-prose h3 { font-size: 0.85rem; }
+
+.intake-prose p {
+  margin-bottom: 0.75em;
+  line-height: 1.65;
+}
+
+.intake-prose ul,
+.intake-prose ol {
+  padding-left: 1.25em;
+  margin-bottom: 0.75em;
+}
+.intake-prose ul { list-style-type: disc; }
+.intake-prose ol { list-style-type: decimal; }
+
+.intake-prose li {
+  margin-bottom: 0.35em;
+  line-height: 1.55;
+}
+.intake-prose li::marker {
+  color: hsl(var(--primary));
+}
+
+.intake-prose strong {
+  font-weight: 600;
+  color: hsl(var(--foreground));
+}
+
+.intake-prose a {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.intake-prose a:hover {
+  opacity: 0.8;
+}
+
+.intake-prose hr {
+  border-color: hsl(var(--border));
+  margin: 1em 0;
+}
+
+.intake-prose blockquote {
+  border-left: 2px solid hsl(var(--primary) / 0.5);
+  padding-left: 0.75em;
+  margin: 0.75em 0;
+  color: hsl(var(--muted-foreground));
+  font-style: italic;
+}

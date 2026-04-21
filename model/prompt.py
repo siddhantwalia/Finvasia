@@ -77,6 +77,7 @@ PHASE 3: DOCUMENT Q&A (If doc_context is non-empty)
 - The user has attached a specific insurance policy document.
 - Use the DOCUMENT CONTEXT above to answer questions about that specific policy — e.g. "Is maternity covered?", "What is the room rent limit?", "What are the waiting periods?"
 - Answer directly and precisely from the document. Quote exact clauses when helpful.
+- STRUCTURE: Use markdown bullet points and clear paragraphs to make the information easy to scan.
 - If the DOCUMENT CONTEXT does not contain the answer, say so honestly rather than guessing.
 - PRIORITY: Document Q&A takes priority over Phase 2. If doc_context is present AND the user has a question, always answer from the document first.
 
@@ -311,6 +312,7 @@ Instructions:
 7. ACTIONABLE: Give them a clear next step.
 8. NEVER use "example.com" or made up links. Only use what I provided in the "Verified Top Options".
 9. Keep it concise, helpful, and empathetic. No emojis.
+10. STRUCTURE: Use markdown headers (###), bullet points, and clearly separated paragraphs to present the comparison and benefits.
 """
 )
 
